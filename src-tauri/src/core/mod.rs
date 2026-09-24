@@ -5,7 +5,11 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod exam;
+pub mod lan;
+pub mod lan_client;
 pub mod package;
+pub mod participant;
+pub mod proctor;
 pub mod shuffle;
 pub mod sync;
 
@@ -26,31 +30,72 @@ pub struct Core {
     data_dir: PathBuf,
 }
 
-/// Konfigurasi yang boleh dilihat frontend (secret tidak pernah dikirim balik).
+/// Mode aplikasi: server lokal titik ujian atau PC peserta.
+pub const MODE_SERVER: &str = "server";
+pub const MODE_PARTICIPANT: &str = "participant";
+
+/// Port bawaan API LAN server lokal.
+pub const DEFAULT_LAN_PORT: u16 = 8787;
+
+/// Konfigurasi yang boleh dilihat frontend (secret dan token perangkat tidak pernah dikirim balik).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigView {
+    /// `server` / `participant`, `None` sebelum pengaturan awal.
+    pub mode: Option<String>,
+    pub device_id: String,
+    pub device_name: Option<String>,
+    pub configured: bool,
+    // Mode server lokal
     pub server_url: Option<String>,
     pub site_code: Option<String>,
     pub has_secret: bool,
-    pub has_pin: bool,
-    pub device_id: String,
-    pub device_name: Option<String>,
     pub auto_sync: bool,
-    pub configured: bool,
+    pub lan_port: u16,
+    // Mode PC peserta
+    pub lan_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ConfigInput {
+pub struct ServerConfigInput {
     pub server_url: String,
     pub site_code: String,
     /// Kosong = pertahankan secret lama.
     pub secret: Option<String>,
-    /// Kosong = pertahankan PIN lama.
-    pub operator_pin: Option<String>,
     pub device_name: Option<String>,
     pub auto_sync: Option<bool>,
+    pub lan_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticipantConfigInput {
+    /// Alamat server lokal, mis. `192.168.1.10` atau `http://192.168.1.10:8787`.
+    pub lan_url: String,
+    pub device_name: Option<String>,
+}
+
+/// Lengkapi alamat server lokal: tambah `http://` dan port bawaan bila tidak ditulis.
+pub fn normalize_lan_url(input: &str) -> AppResult<String> {
+    let raw = input.trim().trim_end_matches('/');
+    if raw.is_empty() {
+        return Err(AppError::user("Alamat server lokal wajib diisi"));
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let mut url =
+        reqwest::Url::parse(&with_scheme).map_err(|_| AppError::user("Alamat server lokal tidak valid, contoh: 192.168.1.10"))?;
+    if url.host_str().is_none() || !(url.scheme() == "http" || url.scheme() == "https") {
+        return Err(AppError::user("Alamat server lokal tidak valid, contoh: 192.168.1.10"));
+    }
+    if url.port().is_none() && !raw.contains("://") {
+        let _ = url.set_port(Some(DEFAULT_LAN_PORT));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +127,8 @@ pub struct LocalSchedule {
     pub asset_count: usize,
     pub assets_missing: usize,
     pub requires_token: bool,
+    /// Token sesi asli (hanya untuk dasbor proktor, tidak dikirim ke PC peserta).
+    pub access_token: Option<String>,
     pub attempts: AttemptCounts,
 }
 
@@ -117,75 +164,126 @@ impl Core {
 
     // ------------------------------------------------------------------ konfigurasi
 
+    pub fn mode(&self) -> AppResult<Option<String>> {
+        self.db().get_config("mode")
+    }
+
+    pub fn is_server(&self) -> bool {
+        self.mode().ok().flatten().as_deref() == Some(MODE_SERVER)
+    }
+
+    pub fn is_participant(&self) -> bool {
+        self.mode().ok().flatten().as_deref() == Some(MODE_PARTICIPANT)
+    }
+
     pub fn config(&self) -> AppResult<ConfigView> {
         let db = self.db();
+        let mode = db.get_config("mode")?;
         let server_url = db.get_config("server_url")?;
         let site_code = db.get_config("site_code")?;
         let has_secret = db.get_config("site_secret")?.is_some();
+        let lan_url = db.get_config("lan_url")?;
+        let configured = match mode.as_deref() {
+            Some(MODE_SERVER) => server_url.is_some() && site_code.is_some() && has_secret,
+            Some(MODE_PARTICIPANT) => lan_url.is_some() && db.get_config("device_token")?.is_some(),
+            _ => false,
+        };
         Ok(ConfigView {
-            configured: server_url.is_some() && site_code.is_some() && has_secret,
+            mode,
+            device_id: db.get_config("device_id")?.unwrap_or_default(),
+            device_name: db.get_config("device_name")?,
+            configured,
             server_url,
             site_code,
             has_secret,
-            has_pin: db.get_config("operator_pin_hash")?.is_some(),
-            device_id: db.get_config("device_id")?.unwrap_or_default(),
-            device_name: db.get_config("device_name")?,
             auto_sync: db.get_config("auto_sync")?.as_deref() != Some("0"),
+            lan_port: db
+                .get_config("lan_port")?
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_LAN_PORT),
+            lan_url,
         })
     }
 
-    pub fn save_config(&self, input: ConfigInput) -> AppResult<ConfigView> {
+    /// Mode hanya bisa dipilih sekali; menggantinya butuh folder data baru.
+    fn set_mode(&self, db: &Db, mode: &str) -> AppResult<()> {
+        match db.get_config("mode")? {
+            Some(m) if m != mode => Err(AppError::user(
+                "Komputer ini sudah diatur dengan mode lain. Hapus folder data aplikasi untuk mengganti mode.",
+            )),
+            Some(_) => Ok(()),
+            None => db.set_config("mode", mode),
+        }
+    }
+
+    fn set_device_name(db: &Db, name: Option<&str>) -> AppResult<()> {
+        match name.map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) => db.set_config("device_name", &n.chars().take(100).collect::<String>()),
+            None => db.delete_config("device_name"),
+        }
+    }
+
+    pub fn save_server_config(&self, input: ServerConfigInput) -> AppResult<ConfigView> {
         let url = input.server_url.trim().trim_end_matches('/').to_string();
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(AppError::user("Alamat server harus diawali http:// atau https://"));
+            return Err(AppError::user("Alamat server pusat harus diawali http:// atau https://"));
         }
         let code = input.site_code.trim().to_uppercase();
         if code.is_empty() {
             return Err(AppError::user("Kode lokasi wajib diisi"));
         }
+        if input.lan_port == Some(0) {
+            return Err(AppError::user("Port LAN tidak valid"));
+        }
         {
             let db = self.db();
-            let has_pin = db.get_config("operator_pin_hash")?.is_some();
-            let new_pin = input.operator_pin.as_deref().map(str::trim).filter(|p| !p.is_empty());
-            if !has_pin && new_pin.is_none() {
-                return Err(AppError::user("PIN operator wajib dibuat"));
-            }
-            if let Some(pin) = new_pin {
-                if pin.len() < 4 {
-                    return Err(AppError::user("PIN operator minimal 4 karakter"));
-                }
-                db.set_config("operator_pin_hash", &crypto::hash_pin(pin).map_err(AppError::Other)?)?;
-            }
             let secret = input.secret.as_deref().map(str::trim).filter(|s| !s.is_empty());
             if secret.is_none() && db.get_config("site_secret")?.is_none() {
                 return Err(AppError::user("Secret lokasi wajib diisi"));
             }
+            self.set_mode(&db, MODE_SERVER)?;
             db.set_config("server_url", &url)?;
+            // Ganti lokasi = daftar proktor lama tidak berlaku lagi.
+            if db.get_config("site_code")?.is_some_and(|c| c != code) {
+                db.conn.execute("DELETE FROM proctors", [])?;
+            }
             db.set_config("site_code", &code)?;
             if let Some(s) = secret {
                 db.set_config("site_secret", s)?;
             }
-            match input.device_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) => db.set_config("device_name", n)?,
-                None => db.delete_config("device_name")?,
-            }
+            Self::set_device_name(&db, input.device_name.as_deref())?;
             if let Some(a) = input.auto_sync {
                 db.set_config("auto_sync", if a { "1" } else { "0" })?;
+            }
+            if let Some(p) = input.lan_port {
+                db.set_config("lan_port", &p.to_string())?;
             }
         }
         self.config()
     }
 
-    pub fn verify_pin(&self, pin: &str) -> AppResult<bool> {
-        let hash = self.db().get_config("operator_pin_hash")?;
-        Ok(hash.map(|h| crypto::verify_phc(&h, pin)).unwrap_or(false))
+    pub fn save_participant_config(&self, input: ParticipantConfigInput) -> AppResult<ConfigView> {
+        let url = normalize_lan_url(&input.lan_url)?;
+        {
+            let db = self.db();
+            self.set_mode(&db, MODE_PARTICIPANT)?;
+            db.set_config("lan_url", &url)?;
+            Self::set_device_name(&db, input.device_name.as_deref())?;
+            // Token perangkat dibuat sekali; proktor menyetujuinya di server lokal.
+            if db.get_config("device_token")?.is_none() {
+                db.set_config("device_token", &crypto::random_token())?;
+            }
+        }
+        self.config()
     }
 
+    /// Kredensial server pusat (mode server lokal).
     pub fn credentials(&self) -> AppResult<Credentials> {
         let db = self.db();
         let get = |k: &str| -> AppResult<String> {
-            db.get_config(k)?
-                .ok_or_else(|| AppError::NotConfigured("isi alamat server, kode lokasi, dan secret di menu Pengaturan".into()))
+            db.get_config(k)?.ok_or_else(|| {
+                AppError::NotConfigured("isi alamat server pusat, kode lokasi, dan secret di menu Pengaturan".into())
+            })
         };
         let device_id = get("device_id")?;
         Ok(Credentials {
@@ -271,6 +369,16 @@ impl Core {
     /// MIME aset dari paket mana pun yang memuatnya (untuk protokol `cbtasset://`).
     pub fn asset_mime(&self, asset_id: &str) -> Option<String> {
         let db = self.db();
+        // PC peserta: MIME dicatat saat media diambil dari server lokal.
+        if let Ok(Some(mime)) = db
+            .conn
+            .query_row("SELECT mime FROM asset_meta WHERE id = ?1", [asset_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+        {
+            return Some(mime);
+        }
         let mut stmt = db
             .conn
             .prepare("SELECT json FROM packages ORDER BY downloaded_at DESC")
@@ -337,6 +445,7 @@ impl Core {
                 asset_count: pkg.assets.len(),
                 assets_missing: missing,
                 requires_token: pkg.schedule.access_token_hash.is_some(),
+                access_token: self.schedule_token(&pkg.schedule.id)?,
                 attempts: self.attempt_counts(Some(&pkg.schedule.id))?,
             });
         }

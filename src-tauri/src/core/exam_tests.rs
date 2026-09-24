@@ -73,27 +73,29 @@ fn login_rules() {
     let start = start_of(&pkg);
     let now = start + Duration::minutes(5);
 
-    let early = core.login(&login_req(&pkg, "DEMO-0001"), start - Duration::minutes(1));
+    let early = core.login(&login_req(&pkg, "DEMO-0001"), None, start - Duration::minutes(1));
     assert!(early.unwrap_err().to_string().contains("belum dimulai"));
 
     let mut bad = login_req(&pkg, "DEMO-0001");
     bad.password = "000000".into();
-    assert!(core.login(&bad, now).is_err());
+    assert!(core.login(&bad, None, now).is_err());
 
     let mut no_token = login_req(&pkg, "DEMO-0001");
     no_token.token = None;
-    assert!(core.login(&no_token, now).unwrap_err().to_string().contains("Token"));
+    assert!(core.login(&no_token, None, now).unwrap_err().to_string().contains("Token"));
 
-    let unknown = core.login(&login_req(&pkg, "TIDAK-ADA"), now);
+    let unknown = core.login(&login_req(&pkg, "TIDAK-ADA"), None, now);
     assert!(unknown.is_err());
 
     // Nomor tidak peka huruf besar-kecil; login kedua melanjutkan attempt yang sama.
-    let a1 = core.login(&login_req(&pkg, "demo-0001"), now).unwrap();
-    let a2 = core.login(&login_req(&pkg, "DEMO-0001"), now + Duration::minutes(1)).unwrap();
+    let a1 = core.login(&login_req(&pkg, "demo-0001"), None, now).unwrap();
+    let a2 = core
+        .login(&login_req(&pkg, "DEMO-0001"), None, now + Duration::minutes(1))
+        .unwrap();
     assert_eq!(a1, a2);
 
     let end: DateTime<Utc> = pkg["schedule"]["endAt"].as_str().unwrap().parse().unwrap();
-    assert!(core.login(&login_req(&pkg, "DEMO-0002"), end).is_err());
+    assert!(core.login(&login_req(&pkg, "DEMO-0002"), None, end).is_err());
 }
 
 #[test]
@@ -102,15 +104,15 @@ fn late_entry_and_missing_media() {
     let pkg = install(&core, |p| p["schedule"]["lateEntryMinutes"] = json!(10));
     let start = start_of(&pkg);
     assert!(core
-        .login(&login_req(&pkg, "DEMO-0003"), start + Duration::minutes(11))
+        .login(&login_req(&pkg, "DEMO-0003"), None, start + Duration::minutes(11))
         .is_err());
     assert!(core
-        .login(&login_req(&pkg, "DEMO-0003"), start + Duration::minutes(9))
+        .login(&login_req(&pkg, "DEMO-0003"), None, start + Duration::minutes(9))
         .is_ok());
 
     let asset = pkg["assets"][0]["id"].as_str().unwrap();
     std::fs::remove_file(core.asset_path(asset)).unwrap();
-    let err = core.login(&login_req(&pkg, "DEMO-0004"), start).unwrap_err();
+    let err = core.login(&login_req(&pkg, "DEMO-0004"), None, start).unwrap_err();
     assert!(err.to_string().contains("media"));
 }
 
@@ -121,7 +123,7 @@ fn session_is_stable_and_shuffles_ordering() {
         p["exam"]["settings"]["shuffleQuestions"] = json!(true);
     });
     let now = start_of(&pkg) + Duration::minutes(1);
-    let id = core.login(&login_req(&pkg, "DEMO-0005"), now).unwrap();
+    let id = core.login(&login_req(&pkg, "DEMO-0005"), None, now).unwrap();
     let s1 = core.session(&id, now).unwrap();
     let s2 = core.session(&id, now + Duration::minutes(3)).unwrap();
     let order = |s: &super::exam::ExamSession| s.sections.iter().flat_map(|x| x.question_ids.clone()).collect::<Vec<_>>();
@@ -144,7 +146,7 @@ fn pick_count_takes_subset() {
     let (core, _d) = temp_core();
     let pkg = install(&core, |p| p["exam"]["sections"][0]["pickCount"] = json!(3));
     let now = start_of(&pkg) + Duration::minutes(1);
-    let id = core.login(&login_req(&pkg, "DEMO-0006"), now).unwrap();
+    let id = core.login(&login_req(&pkg, "DEMO-0006"), None, now).unwrap();
     let s = core.session(&id, now).unwrap();
     assert_eq!(s.sections[0].question_ids.len(), 3);
     assert_eq!(s.sections[1].question_ids.len(), 8);
@@ -155,7 +157,7 @@ fn answers_deadline_and_upload_payload() {
     let (core, _d) = temp_core();
     let pkg = install(&core, |_| {});
     let t0 = start_of(&pkg) + Duration::minutes(1);
-    let id = core.login(&login_req(&pkg, "DEMO-0007"), t0).unwrap();
+    let id = core.login(&login_req(&pkg, "DEMO-0007"), None, t0).unwrap();
     let q = qid_of(&pkg, "single_choice");
     let save = |resp: Value, at: DateTime<Utc>| {
         core.save_answer(
@@ -224,13 +226,15 @@ fn violations_terminate_and_min_time_blocks_submit() {
         p["exam"]["settings"]["minTimeBeforeSubmitMinutes"] = json!(30);
     });
     let t0 = start_of(&pkg) + Duration::minutes(1);
-    let a = core.login(&login_req(&pkg, "DEMO-0008"), t0).unwrap();
+    let a = core.login(&login_req(&pkg, "DEMO-0008"), None, t0).unwrap();
     let err = core.submit(&a, true, t0 + Duration::minutes(10)).unwrap_err();
     assert!(err.to_string().contains("menit"));
     assert_eq!(core.submit(&a, true, t0 + Duration::minutes(31)).unwrap().status, "submitted");
-    assert!(core.login(&login_req(&pkg, "DEMO-0008"), t0 + Duration::minutes(32)).is_err());
+    assert!(core
+        .login(&login_req(&pkg, "DEMO-0008"), None, t0 + Duration::minutes(32))
+        .is_err());
 
-    let b = core.login(&login_req(&pkg, "DEMO-0009"), t0).unwrap();
+    let b = core.login(&login_req(&pkg, "DEMO-0009"), None, t0).unwrap();
     let st = core
         .log_event(&b, "violation", Some(json!({ "reason": "focus_lost" })), t0)
         .unwrap();
@@ -245,37 +249,66 @@ fn attachments_only_for_file_upload_questions() {
     let (core, _d) = temp_core();
     let pkg = install(&core, |_| {});
     let t0 = start_of(&pkg) + Duration::minutes(1);
-    let a = core.login(&login_req(&pkg, "DEMO-0010"), t0).unwrap();
+    let a = core.login(&login_req(&pkg, "DEMO-0010"), None, t0).unwrap();
     let fu = qid_of(&pkg, "file_upload");
     let saved = core
-        .save_attachment(&a, &fu, "kerja saya.jpg", "image/jpeg", b"jpegdata", t0)
+        .save_attachment(&a, &fu, None, "kerja saya.jpg", "image/jpeg", b"jpegdata", t0)
         .unwrap();
     assert_eq!(saved.size, 8);
     assert_eq!(saved.name, "kerja saya.jpg");
     let essay = qid_of(&pkg, "essay");
-    assert!(core.save_attachment(&a, &essay, "x.txt", "text/plain", b"x", t0).is_err());
+    assert!(core
+        .save_attachment(&a, &essay, None, "x.txt", "text/plain", b"x", t0)
+        .is_err());
 }
 
 #[test]
-fn config_requires_pin_and_secret() {
+fn server_config_requires_secret_and_fixes_mode() {
     let (core, _d) = temp_core();
-    let input = |secret: Option<&str>, pin: Option<&str>| super::ConfigInput {
+    let input = |secret: Option<&str>| super::ServerConfigInput {
         server_url: "http://server:8080/".into(),
         site_code: "lab-1".into(),
         secret: secret.map(String::from),
-        operator_pin: pin.map(String::from),
-        device_name: Some("PC-01".into()),
+        device_name: Some("SERVER-LAB1".into()),
         auto_sync: None,
+        lan_port: None,
     };
-    assert!(core.save_config(input(Some("rahasia"), None)).is_err());
-    assert!(core.save_config(input(None, Some("1234"))).is_err());
-    assert!(core.save_config(input(Some("rahasia"), Some("12"))).is_err());
-    let v = core.save_config(input(Some("rahasia"), Some("1234"))).unwrap();
-    assert!(v.configured && v.has_pin && v.auto_sync);
+    assert!(core.save_server_config(input(None)).is_err());
+    let v = core.save_server_config(input(Some("rahasia"))).unwrap();
+    assert!(v.configured && v.auto_sync);
+    assert_eq!(v.mode.as_deref(), Some(super::MODE_SERVER));
     assert_eq!(v.server_url.as_deref(), Some("http://server:8080"));
     assert_eq!(v.site_code.as_deref(), Some("LAB-1"));
-    // Simpan ulang tanpa secret/PIN mempertahankan yang lama.
-    core.save_config(input(None, None)).unwrap();
-    assert!(core.verify_pin("1234").unwrap());
+    assert_eq!(v.lan_port, super::DEFAULT_LAN_PORT);
+    // Simpan ulang tanpa secret mempertahankan yang lama.
+    core.save_server_config(input(None)).unwrap();
     assert_eq!(core.credentials().unwrap().secret, "rahasia");
+    // Mode tidak bisa diganti di folder data yang sama.
+    let err = core
+        .save_participant_config(super::ParticipantConfigInput {
+            lan_url: "192.168.1.10".into(),
+            device_name: None,
+        })
+        .unwrap_err();
+    assert!(err.to_string().contains("mode lain"));
+}
+
+#[test]
+fn participant_config_normalizes_address() {
+    let (core, _d) = temp_core();
+    let v = core
+        .save_participant_config(super::ParticipantConfigInput {
+            lan_url: " 192.168.1.10 ".into(),
+            device_name: Some("LAB1-PC07".into()),
+        })
+        .unwrap();
+    assert!(v.configured);
+    assert_eq!(v.mode.as_deref(), Some(super::MODE_PARTICIPANT));
+    assert_eq!(v.lan_url.as_deref(), Some("http://192.168.1.10:8787"));
+    assert_eq!(
+        super::normalize_lan_url("http://10.0.0.2:9000/").unwrap(),
+        "http://10.0.0.2:9000"
+    );
+    assert_eq!(super::normalize_lan_url("server-lab:8080").unwrap(), "http://server-lab:8080");
+    assert!(super::normalize_lan_url("").is_err());
 }

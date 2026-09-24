@@ -14,8 +14,10 @@ interface LocalAnswer {
 
 const SAVE_DEBOUNCE_MS = 500;
 const VIOLATION_DEBOUNCE_MS = 2000;
+/** Cek status ke server lokal (tambahan waktu / penghentian dari proktor, kirim antrean). */
+const HEARTBEAT_MS = 10_000;
 
-export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFinished: (s: ExamSession) => void }) {
+export function ExamPage({ initial, onFinished, onAbort }: { initial: ExamSession; onFinished: (s: ExamSession) => void; onAbort: () => void }) {
   const session = initial;
   const settings = session.exam.settings;
   const attemptId = session.attemptId;
@@ -35,6 +37,8 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
   const [saveError, setSaveError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [finishing, setFinishing] = useState(false);
+  const [link, setLink] = useState({ connected: true, pending: 0 });
+  const [moved, setMoved] = useState<string | null>(null);
 
   const deadlineRef = useRef(Date.now() + session.remainingSeconds * 1000);
   const timers = useRef(new Map<string, number>());
@@ -69,20 +73,37 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
         }
       }
       await ipc.setExamMode(false, false).catch(() => {});
-      onFinished(await ipc.getSession(attemptId));
+      try {
+        onFinished(await ipc.getSession(attemptId));
+      } catch {
+        onAbort();
+      }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [attemptId, onFinished],
+    [attemptId, onFinished, onAbort],
   );
 
   const applyState = useCallback(
     (st: AttemptState) => {
       deadlineRef.current = Date.now() + st.remainingSeconds * 1000;
       setViolations(st.violationCount);
+      setLink({ connected: st.connected, pending: st.pending });
       if (st.status !== "in_progress") void finish(false);
     },
     [finish],
   );
+
+  // Ujian diambil alih PC lain (proktor mengizinkan pindah komputer).
+  const onLinkError = useCallback((err: unknown) => {
+    const text = errorText(err);
+    if (/komputer lain/i.test(text)) {
+      finishedRef.current = true;
+      setMoved(text);
+      void ipc.setExamMode(false, false).catch(() => {});
+      return true;
+    }
+    return false;
+  }, []);
 
   // ------------------------------------------------------------ simpan jawaban
   const persist = useCallback(
@@ -104,10 +125,10 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
         setSaveError(null);
         applyState(st);
       } catch (err) {
-        setSaveError(errorText(err));
+        if (!onLinkError(err)) setSaveError(errorText(err));
       }
     },
-    [attemptId, items, applyState],
+    [attemptId, items, applyState, onLinkError],
   );
 
   const schedule = useCallback(
@@ -157,6 +178,10 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
       setRemaining(left);
       if (left <= 0) void finish(false);
     }, 1000);
+    const heartbeat = window.setInterval(() => {
+      if (finishedRef.current) return;
+      ipc.attemptState(attemptId).then(applyState).catch(onLinkError);
+    }, HEARTBEAT_MS);
 
     let lastViolation = 0;
     const violation = (reason: string) => {
@@ -191,12 +216,13 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
     const unlisten = listen("close-blocked", () => setNotice("Aplikasi tidak bisa ditutup selama ujian berlangsung."));
     return () => {
       window.clearInterval(tick);
+      window.clearInterval(heartbeat);
       window.removeEventListener("blur", onBlur);
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("keydown", onKey);
       void unlisten.then((f) => f());
     };
-  }, [attemptId, settings.lockdown, settings.maxViolations, applyState, finish]);
+  }, [attemptId, settings.lockdown, settings.maxViolations, applyState, finish, onLinkError]);
 
   // ------------------------------------------------------------ tampilan
   const item = items[index];
@@ -236,6 +262,14 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
         </div>
       ) : null}
       {saveError ? <div className="exam-notice exam-notice-danger" role="alert">Gagal menyimpan jawaban: {saveError}</div> : null}
+      {!link.connected ? (
+        <div className="exam-notice" role="status">
+          <span>
+            Koneksi ke server lokal terputus. Tetap kerjakan: jawaban tersimpan di komputer ini dan dikirim otomatis
+            {link.pending ? ` (${link.pending} menunggu)` : ""}.
+          </span>
+        </div>
+      ) : null}
 
       {intro ? (
         <main className="exam-intro">
@@ -352,6 +386,10 @@ export function ExamPage({ initial, onFinished }: { initial: ExamSession; onFini
           {flaggedCount ? <li className="text-warning">{flaggedCount} soal masih ditandai ragu-ragu</li> : null}
         </ul>
         {Date.now() < canSubmitAt ? <Alert tone="info">Ujian baru bisa dikumpulkan setelah pukul {fmtTime(session.canSubmitAt)}.</Alert> : null}
+      </Modal>
+
+      <Modal open={!!moved} title="Ujian dipindahkan" footer={<Button variant="primary" onClick={onAbort}>Kembali ke layar login</Button>}>
+        <p>{moved}</p>
       </Modal>
     </div>
   );

@@ -7,7 +7,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::error::AppResult;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE IF NOT EXISTS config (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -74,7 +75,68 @@ CREATE TABLE IF NOT EXISTS batches (
   status      TEXT NOT NULL,
   response    TEXT
 );
-"#];
+"#,
+    r#"
+-- Server lokal: PC peserta terikat ke attempt; proktor, perangkat, dan log aksi proktor.
+ALTER TABLE attempts ADD COLUMN device_id TEXT;
+ALTER TABLE attachments ADD COLUMN device_id TEXT;
+CREATE TABLE IF NOT EXISTS proctors (
+  id            TEXT PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE,
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL,
+  password_hash TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS devices (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  token_hash    TEXT NOT NULL,
+  status        TEXT NOT NULL,
+  pairing_code  TEXT NOT NULL,
+  app_version   TEXT,
+  ip            TEXT,
+  created_at    TEXT NOT NULL,
+  approved_at   TEXT,
+  approved_by   TEXT,
+  last_seen_at  TEXT
+);
+CREATE TABLE IF NOT EXISTS proctor_log (
+  id             TEXT PRIMARY KEY,
+  at             TEXT NOT NULL,
+  proctor_id     TEXT,
+  username       TEXT NOT NULL,
+  action         TEXT NOT NULL,
+  schedule_id    TEXT,
+  attempt_id     TEXT,
+  participant_id TEXT,
+  data           TEXT,
+  synced         INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS schedule_tokens (
+  schedule_id  TEXT PRIMARY KEY,
+  access_token TEXT
+);
+-- PC peserta: sesi tersimpan (untuk lanjut saat terputus dari server lokal) dan antrean kirim.
+CREATE TABLE IF NOT EXISTS cached_sessions (
+  attempt_id TEXT PRIMARY KEY,
+  json       TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS outbox (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  body       TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT
+);
+CREATE TABLE IF NOT EXISTS asset_meta (
+  id   TEXT PRIMARY KEY,
+  mime TEXT NOT NULL
+);
+"#,
+];
 
 pub struct Db {
     pub conn: Connection,

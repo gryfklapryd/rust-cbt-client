@@ -18,7 +18,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+# API LAN server lokal untuk PC peserta
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+# Menampilkan alamat IP server lokal ke proktor
+if-addrs = "0.15"
 argon2 = "0.5"
 # OsRng untuk salt hash PIN operator
 rand_core = { version = "0.6", features = ["getrandom"] }

@@ -22,7 +22,7 @@ pub const STATUS_SUBMITTED: &str = "submitted";
 pub const STATUS_TIMED_OUT: &str = "timed_out";
 pub const STATUS_TERMINATED: &str = "terminated";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginRequest {
     pub schedule_id: String,
@@ -31,7 +31,7 @@ pub struct LoginRequest {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionParticipant {
     pub id: String,
@@ -41,7 +41,7 @@ pub struct SessionParticipant {
     pub photo_asset_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSection {
     pub id: String,
@@ -50,7 +50,7 @@ pub struct SessionSection {
     pub question_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionAnswer {
     pub response: Value,
@@ -58,7 +58,7 @@ pub struct SessionAnswer {
     pub time_spent: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionExam {
     pub code: String,
@@ -69,7 +69,7 @@ pub struct SessionExam {
 }
 
 /// Semua yang dibutuhkan UI untuk menampilkan ujian seorang peserta.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExamSession {
     pub attempt_id: String,
@@ -93,7 +93,7 @@ pub struct ExamSession {
     pub current_index: i64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveAnswerRequest {
     pub attempt_id: String,
@@ -107,15 +107,44 @@ pub struct SaveAnswerRequest {
     pub current_index: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttemptState {
     pub status: String,
     pub remaining_seconds: i64,
     pub violation_count: i64,
+    pub deadline: DateTime<Utc>,
+    /// PC peserta: false bila server lokal sedang tidak terjangkau.
+    #[serde(default = "yes")]
+    pub connected: bool,
+    /// PC peserta: jumlah perubahan yang menunggu dikirim ke server lokal.
+    #[serde(default)]
+    pub pending: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+fn yes() -> bool {
+    true
+}
+
+impl AttemptState {
+    fn new(status: impl Into<String>, deadline: DateTime<Utc>, now: DateTime<Utc>, violation_count: i64) -> Self {
+        let status = status.into();
+        AttemptState {
+            remaining_seconds: if status == STATUS_IN_PROGRESS {
+                (deadline - now).num_seconds().max(0)
+            } else {
+                0
+            },
+            status,
+            violation_count,
+            deadline,
+            connected: true,
+            pending: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedAttachment {
     pub attachment_id: String,
@@ -137,6 +166,7 @@ struct AttemptRow {
     option_orders: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     current_index: i64,
     violation_count: i64,
+    device_id: Option<String>,
 }
 
 fn parse_time(s: &str) -> AppResult<DateTime<Utc>> {
@@ -145,7 +175,7 @@ fn parse_time(s: &str) -> AppResult<DateTime<Utc>> {
         .map_err(|e| AppError::Other(format!("waktu tidak valid: {e}")))
 }
 
-fn fmt_time(t: DateTime<Utc>) -> String {
+pub(crate) fn fmt_time(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
@@ -156,7 +186,7 @@ impl Core {
             .conn
             .query_row(
                 "SELECT id, schedule_id, package_id, participant_id, status, started_at, finished_at, deadline,
-                        plan, option_orders, current_index, violation_count
+                        plan, option_orders, current_index, violation_count, device_id
                  FROM attempts WHERE id = ?1",
                 [attempt_id],
                 |r| {
@@ -173,6 +203,7 @@ impl Core {
                         r.get::<_, String>(9)?,
                         r.get::<_, i64>(10)?,
                         r.get::<_, i64>(11)?,
+                        r.get::<_, Option<String>>(12)?,
                     ))
                 },
             )
@@ -191,6 +222,7 @@ impl Core {
             option_orders: serde_json::from_str(&row.9)?,
             current_index: row.10,
             violation_count: row.11,
+            device_id: row.12,
         })
     }
 
@@ -229,15 +261,17 @@ impl Core {
         Ok(a.status.clone())
     }
 
-    /// Login peserta (offline). Membuat attempt baru atau melanjutkan attempt yang berjalan.
-    pub fn login(&self, req: &LoginRequest, now: DateTime<Utc>) -> AppResult<String> {
+    /// Login peserta (diverifikasi di server lokal). Membuat attempt baru atau melanjutkan
+    /// attempt yang berjalan. `device_id` = PC peserta; attempt terikat ke PC tersebut sampai
+    /// proktor mengizinkan pindah komputer.
+    pub fn login(&self, req: &LoginRequest, device_id: Option<&str>, now: DateTime<Utc>) -> AppResult<String> {
         let (pkg, _) = self
             .latest_package(&req.schedule_id)?
             .ok_or_else(|| AppError::user("Paket ujian untuk jadwal ini belum diunduh"))?;
         let missing = pkg.assets.iter().filter(|a| !self.asset_present(a)).count();
         if missing > 0 {
             return Err(AppError::user(format!(
-                "{missing} media ujian belum terunduh. Hubungi operator."
+                "{missing} media ujian belum lengkap di server lokal. Hubungi proktor."
             )));
         }
 
@@ -259,7 +293,7 @@ impl Core {
             }
         }
 
-        // Attempt yang sudah ada (melanjutkan setelah aplikasi tertutup / pindah komputer tidak didukung).
+        // Attempt yang sudah ada: lanjutkan di PC yang sama, atau di PC lain setelah diizinkan proktor.
         let existing: Option<String> = self
             .db()
             .conn
@@ -275,7 +309,22 @@ impl Core {
             if status != STATUS_IN_PROGRESS {
                 return Err(AppError::user("Anda sudah menyelesaikan ujian ini"));
             }
-            self.insert_event(&id, "resume", now, None)?;
+            if let (Some(bound), Some(dev)) = (a.device_id.as_deref(), device_id) {
+                if bound != dev {
+                    let name = self.device_name(bound).unwrap_or_else(|| bound.chars().take(8).collect());
+                    return Err(AppError::user(format!(
+                        "Anda sedang ujian di komputer lain ({name}). Minta proktor mengizinkan pindah komputer."
+                    )));
+                }
+            }
+            if a.device_id.is_none() {
+                if let Some(dev) = device_id {
+                    self.db()
+                        .conn
+                        .execute("UPDATE attempts SET device_id = ?2 WHERE id = ?1", params![id, dev])?;
+                }
+            }
+            self.insert_event(&id, "resume", now, device_id.map(|d| json!({ "deviceId": d })).as_ref())?;
             self.bump_sequence(&id)?;
             return Ok(id);
         }
@@ -304,8 +353,8 @@ impl Core {
         let orders = plan_options(&pkg, &attempt_id, &all_ids);
         let deadline = (now + Duration::minutes(pkg.exam.duration_minutes)).min(pkg.schedule.end_at);
         self.db().conn.execute(
-            "INSERT INTO attempts (id, schedule_id, package_id, participant_id, status, sequence, started_at, deadline, plan, option_orders)
-             VALUES (?1, ?2, ?3, ?4, 'in_progress', 1, ?5, ?6, ?7, ?8)",
+            "INSERT INTO attempts (id, schedule_id, package_id, participant_id, status, sequence, started_at, deadline, plan, option_orders, device_id)
+             VALUES (?1, ?2, ?3, ?4, 'in_progress', 1, ?5, ?6, ?7, ?8, ?9)",
             params![
                 attempt_id,
                 pkg.schedule.id,
@@ -315,9 +364,15 @@ impl Core {
                 fmt_time(deadline),
                 serde_json::to_string(&plan)?,
                 serde_json::to_string(&orders)?,
+                device_id,
             ],
         )?;
-        self.insert_event(&attempt_id, "start", now, None)?;
+        self.insert_event(
+            &attempt_id,
+            "start",
+            now,
+            device_id.map(|d| json!({ "deviceId": d })).as_ref(),
+        )?;
         Ok(attempt_id)
     }
 
@@ -431,7 +486,10 @@ impl Core {
 
     fn require_active(&self, attempt_id: &str, now: DateTime<Utc>) -> AppResult<AttemptRow> {
         let a = self.load_attempt(attempt_id)?;
-        if a.status != STATUS_IN_PROGRESS {
+        // Jawaban dari antrean PC peserta yang sempat terputus: `now` adalah waktu jawaban
+        // dibuat. Diterima bila masih dalam batas waktu walau attempt sudah ditutup otomatis.
+        let late_queued = a.status == STATUS_TIMED_OUT && now <= a.deadline + Duration::seconds(SAVE_GRACE_SECONDS);
+        if a.status != STATUS_IN_PROGRESS && !late_queued {
             return Err(AppError::user("Ujian sudah selesai"));
         }
         if now > a.deadline + Duration::seconds(SAVE_GRACE_SECONDS) {
@@ -491,22 +549,14 @@ impl Core {
             db.conn
                 .execute("UPDATE attempts SET sequence = sequence + 1 WHERE id = ?1", [&req.attempt_id])?;
         }
-        Ok(AttemptState {
-            status: a.status,
-            remaining_seconds: (a.deadline - now).num_seconds().max(0),
-            violation_count: a.violation_count,
-        })
+        Ok(AttemptState::new(a.status, a.deadline, now, a.violation_count))
     }
 
     /// Catat kejadian (mis. `violation`, `focus_lost`). Pelanggaran melewati batas menghentikan ujian.
     pub fn log_event(&self, attempt_id: &str, kind: &str, data: Option<Value>, now: DateTime<Utc>) -> AppResult<AttemptState> {
         let a = self.load_attempt(attempt_id)?;
         if a.status != STATUS_IN_PROGRESS {
-            return Ok(AttemptState {
-                status: a.status,
-                remaining_seconds: 0,
-                violation_count: a.violation_count,
-            });
+            return Ok(AttemptState::new(a.status, a.deadline, now, a.violation_count));
         }
         let kind: String = kind
             .chars()
@@ -528,29 +578,28 @@ impl Core {
         let max = pkg.exam.settings.max_violations;
         if kind == "violation" && max > 0 && violations >= max {
             self.finish(attempt_id, STATUS_TERMINATED, now, "terminated")?;
-            return Ok(AttemptState {
-                status: STATUS_TERMINATED.into(),
-                remaining_seconds: 0,
-                violation_count: violations,
-            });
+            return Ok(AttemptState::new(STATUS_TERMINATED, a.deadline, now, violations));
         }
-        Ok(AttemptState {
-            status: a.status,
-            remaining_seconds: (a.deadline - now).num_seconds().max(0),
-            violation_count: violations,
-        })
+        Ok(AttemptState::new(a.status, a.deadline, now, violations))
     }
 
     /// Kumpulkan ujian. `manual = true` bila peserta menekan tombol selesai.
     pub fn submit(&self, attempt_id: &str, manual: bool, now: DateTime<Utc>) -> AppResult<AttemptState> {
         let a = self.load_attempt(attempt_id)?;
+        // Tombol selesai yang ditekan sebelum batas waktu tetapi baru sampai (antrean PC peserta).
+        if manual && a.status == STATUS_TIMED_OUT && now <= a.deadline {
+            let db = self.db();
+            db.conn.execute(
+                "UPDATE attempts SET status = ?2, finished_at = ?3, sequence = sequence + 1 WHERE id = ?1",
+                params![attempt_id, STATUS_SUBMITTED, fmt_time(now)],
+            )?;
+            drop(db);
+            self.insert_event(attempt_id, "submit", now, None)?;
+            return Ok(AttemptState::new(STATUS_SUBMITTED, a.deadline, now, a.violation_count));
+        }
         let status = self.enforce_deadline(&a, now)?;
         if status != STATUS_IN_PROGRESS {
-            return Ok(AttemptState {
-                status,
-                remaining_seconds: 0,
-                violation_count: a.violation_count,
-            });
+            return Ok(AttemptState::new(status, a.deadline, now, a.violation_count));
         }
         if manual {
             let pkg = self.package_by_id(&a.package_id)?;
@@ -563,23 +612,141 @@ impl Core {
             }
         }
         self.finish(attempt_id, STATUS_SUBMITTED, now, "submit")?;
-        Ok(AttemptState {
-            status: STATUS_SUBMITTED.into(),
-            remaining_seconds: 0,
-            violation_count: a.violation_count,
-        })
+        Ok(AttemptState::new(STATUS_SUBMITTED, a.deadline, now, a.violation_count))
+    }
+
+    /// Status terkini attempt (dipanggil berkala oleh PC peserta), sekaligus menutup attempt
+    /// yang waktunya habis.
+    pub fn attempt_state(&self, attempt_id: &str, now: DateTime<Utc>) -> AppResult<AttemptState> {
+        let a = self.load_attempt(attempt_id)?;
+        let status = self.enforce_deadline(&a, now)?;
+        Ok(AttemptState::new(status, a.deadline, now, a.violation_count))
+    }
+
+    /// Daftar media paket milik attempt (untuk disimpan di PC peserta).
+    pub fn package_assets_of_attempt(&self, attempt_id: &str) -> AppResult<Vec<super::package::AssetInfo>> {
+        let a = self.load_attempt(attempt_id)?;
+        Ok(self.package_by_id(&a.package_id)?.assets)
+    }
+
+    /// PC peserta pemilik attempt (None = belum terikat / boleh pindah komputer).
+    pub fn attempt_device(&self, attempt_id: &str) -> AppResult<Option<String>> {
+        Ok(self.load_attempt(attempt_id)?.device_id)
+    }
+
+    // ------------------------------------------------------------------ aksi proktor
+
+    /// Lepas ikatan attempt dari PC-nya sehingga peserta bisa login di PC lain.
+    pub fn release_device(&self, attempt_id: &str, now: DateTime<Utc>) -> AppResult<()> {
+        let a = self.load_attempt(attempt_id)?;
+        self.db()
+            .conn
+            .execute("UPDATE attempts SET device_id = NULL WHERE id = ?1", [attempt_id])?;
+        self.insert_event(
+            attempt_id,
+            "proctor_release_device",
+            now,
+            a.device_id.map(|d| json!({ "deviceId": d })).as_ref(),
+        )?;
+        self.bump_sequence(attempt_id)
+    }
+
+    /// Tambah waktu ujian seorang peserta (menit, boleh negatif untuk koreksi).
+    pub fn extend_time(&self, attempt_id: &str, minutes: i64, now: DateTime<Utc>) -> AppResult<AttemptState> {
+        if minutes == 0 || minutes.abs() > 600 {
+            return Err(AppError::user("Tambahan waktu harus antara -600 dan 600 menit, bukan 0"));
+        }
+        let a = self.load_attempt(attempt_id)?;
+        let deadline = a.deadline + Duration::minutes(minutes);
+        self.db().conn.execute(
+            "UPDATE attempts SET deadline = ?2 WHERE id = ?1",
+            params![attempt_id, fmt_time(deadline)],
+        )?;
+        self.insert_event(attempt_id, "proctor_extra_time", now, Some(&json!({ "minutes": minutes })))?;
+        self.bump_sequence(attempt_id)?;
+        let status = self.enforce_deadline(&self.load_attempt(attempt_id)?, now)?;
+        Ok(AttemptState::new(status, deadline, now, a.violation_count))
+    }
+
+    /// Hentikan ujian seorang peserta (mis. kecurangan).
+    pub fn terminate(&self, attempt_id: &str, reason: Option<&str>, now: DateTime<Utc>) -> AppResult<()> {
+        let a = self.load_attempt(attempt_id)?;
+        if a.status != STATUS_IN_PROGRESS {
+            return Err(AppError::user("Ujian peserta ini sudah selesai"));
+        }
+        self.finish(attempt_id, STATUS_TERMINATED, now, "proctor_terminate")?;
+        if let Some(r) = reason.map(str::trim).filter(|r| !r.is_empty()) {
+            self.insert_event(attempt_id, "proctor_note", now, Some(&json!({ "note": r })))?;
+        }
+        Ok(())
+    }
+
+    /// Buka kembali attempt yang sudah selesai / dihentikan agar peserta bisa melanjutkan.
+    /// Hitungan pelanggaran direset (riwayat tetap tercatat di event). Bila waktunya sudah
+    /// habis, `extra_minutes` wajib diisi.
+    pub fn unlock(&self, attempt_id: &str, extra_minutes: Option<i64>, now: DateTime<Utc>) -> AppResult<AttemptState> {
+        let a = self.load_attempt(attempt_id)?;
+        if a.status == STATUS_IN_PROGRESS {
+            return Err(AppError::user("Ujian peserta ini masih berlangsung"));
+        }
+        let extra = extra_minutes.unwrap_or(0).clamp(0, 600);
+        let base = if a.deadline > now { a.deadline } else { now };
+        let deadline = if extra > 0 {
+            base + Duration::minutes(extra)
+        } else {
+            a.deadline
+        };
+        if deadline <= now {
+            return Err(AppError::user(
+                "Waktu ujian peserta ini sudah habis. Isi tambahan waktu untuk membuka kembali.",
+            ));
+        }
+        self.db().conn.execute(
+            "UPDATE attempts SET status = 'in_progress', finished_at = NULL, violation_count = 0, deadline = ?2, sequence = sequence + 1
+             WHERE id = ?1",
+            params![attempt_id, fmt_time(deadline)],
+        )?;
+        self.insert_event(
+            attempt_id,
+            "proctor_unlock",
+            now,
+            Some(&json!({ "previousStatus": a.status, "extraMinutes": extra })),
+        )?;
+        Ok(AttemptState::new(STATUS_IN_PROGRESS, deadline, now, 0))
     }
 
     /// Simpan berkas jawaban (soal unggah berkas) secara lokal; diunggah saat sinkronisasi.
+    /// `attachment_id` dari PC peserta membuat pengiriman ulang tidak menggandakan berkas.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_attachment(
         &self,
         attempt_id: &str,
         question_id: &str,
+        attachment_id: Option<&str>,
         name: &str,
         mime: &str,
         bytes: &[u8],
         now: DateTime<Utc>,
     ) -> AppResult<SavedAttachment> {
+        if let Some(id) = attachment_id {
+            let existing = self
+                .db()
+                .conn
+                .query_row(
+                    "SELECT name, size, mime FROM attachments WHERE id = ?1 AND attempt_id = ?2",
+                    params![id, attempt_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?)),
+                )
+                .optional()?;
+            if let Some((name, size, mime)) = existing {
+                return Ok(SavedAttachment {
+                    attachment_id: id.to_string(),
+                    name,
+                    size,
+                    mime,
+                });
+            }
+        }
         let a = self.require_active(attempt_id, now)?;
         let pkg = self.package_by_id(&a.package_id)?;
         let q = pkg
@@ -592,7 +759,12 @@ impl Core {
         if bytes.len() as f64 > max_mb * 1024.0 * 1024.0 {
             return Err(AppError::user(format!("Ukuran berkas melebihi {max_mb} MB")));
         }
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = match attachment_id {
+            Some(id) => uuid::Uuid::parse_str(id)
+                .map_err(|_| AppError::user("ID lampiran tidak valid"))?
+                .to_string(),
+            None => uuid::Uuid::new_v4().to_string(),
+        };
         let safe_name: String = name
             .chars()
             .map(|c| if c.is_alphanumeric() || ".-_ ".contains(c) { c } else { '_' })
@@ -676,14 +848,33 @@ impl Core {
             }
         }
         let question_order: Vec<String> = a.plan.iter().flat_map(|s| s.question_ids.clone()).collect();
-        let hostname = std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .ok()
-            .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        drop(db);
+        // PC peserta tempat ujian dikerjakan; server lokal sebagai cadangan.
+        let (device_id, hostname) = match a.device_id.as_deref() {
+            Some(d) => (
+                format!(
+                    "{} ({})",
+                    self.device_name(d).unwrap_or_default(),
+                    d.chars().take(8).collect::<String>()
+                ),
+                self.device_name(d),
+            ),
+            None => (
+                device_id.to_string(),
+                std::env::var("COMPUTERNAME")
+                    .or_else(|_| std::env::var("HOSTNAME"))
+                    .ok()
+                    .or_else(|| std::fs::read_to_string("/etc/hostname").ok()),
+            ),
+        };
+        let hostname = hostname
             .map(|h| h.trim().chars().take(200).collect::<String>())
             .filter(|h| !h.is_empty());
         let mut client = Map::new();
-        client.insert("deviceId".into(), json!(device_id.chars().take(200).collect::<String>()));
+        client.insert(
+            "deviceId".into(),
+            json!(device_id.trim().chars().take(200).collect::<String>()),
+        );
         client.insert("appVersion".into(), json!(super::api::APP_VERSION));
         if let Some(h) = hostname {
             client.insert("hostname".into(), json!(h));

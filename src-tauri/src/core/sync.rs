@@ -6,7 +6,7 @@ use rusqlite::params;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::api::{BatchAck, SyncApi};
+use super::api::{BatchAck, RemoteSchedule, SyncApi};
 use super::error::{AppError, AppResult};
 use super::Core;
 
@@ -29,6 +29,38 @@ pub struct UploadResult {
     pub attachments_uploaded: usize,
     pub attempts_sent: usize,
     pub batches: Vec<String>,
+    pub proctor_log_sent: usize,
+}
+
+/// Perbarui daftar akun proktor dari server pusat. Mengembalikan jumlah proktor.
+pub async fn sync_proctors(core: &Core, api: &SyncApi) -> AppResult<usize> {
+    let proctors = api.proctors().await?;
+    core.store_proctors(&proctors)?;
+    Ok(proctors.len())
+}
+
+/// Daftar jadwal dari server pusat; token sesi ikut disimpan untuk dasbor proktor.
+pub async fn remote_schedules(core: &Core, api: &SyncApi) -> AppResult<Vec<RemoteSchedule>> {
+    let schedules = api.schedules().await?;
+    for s in &schedules {
+        core.store_schedule_token(&s.id, s.access_token.as_deref())?;
+    }
+    Ok(schedules)
+}
+
+/// Kirim log aksi proktor yang belum terkirim.
+pub async fn upload_proctor_log(core: &Core, api: &SyncApi) -> AppResult<usize> {
+    let mut sent = 0;
+    loop {
+        let entries = core.unsynced_proctor_log(500)?;
+        if entries.is_empty() {
+            return Ok(sent);
+        }
+        let (ids, bodies): (Vec<String>, Vec<Value>) = entries.into_iter().unzip();
+        api.proctor_log(&bodies).await?;
+        core.mark_proctor_log_synced(&ids)?;
+        sent += ids.len();
+    }
 }
 
 /// Unduh (atau perbarui) paket sebuah jadwal beserta semua medianya.
@@ -135,6 +167,7 @@ pub async fn upload_results(core: &Core, api: &SyncApi) -> AppResult<UploadResul
         result.attempts_sent += sent.len();
         result.batches.push(batch_id);
     }
+    result.proctor_log_sent = upload_proctor_log(core, api).await?;
     Ok(result)
 }
 

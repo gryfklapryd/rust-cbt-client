@@ -8,24 +8,39 @@ export function errorText(err: unknown): string {
   return String(err);
 }
 
+export type AppMode = "server" | "participant";
+
 export interface ConfigView {
+  mode: AppMode | null;
+  deviceId: string;
+  deviceName: string | null;
+  configured: boolean;
   serverUrl: string | null;
   siteCode: string | null;
   hasSecret: boolean;
-  hasPin: boolean;
-  deviceId: string;
-  deviceName: string | null;
   autoSync: boolean;
-  configured: boolean;
+  lanPort: number;
+  lanUrl: string | null;
 }
 
-export interface ConfigInput {
+export interface ServerConfigInput {
   serverUrl: string;
   siteCode: string;
   secret?: string | null;
-  operatorPin?: string | null;
   deviceName?: string | null;
   autoSync?: boolean;
+  lanPort?: number | null;
+}
+
+export interface ParticipantConfigInput {
+  lanUrl: string;
+  deviceName?: string | null;
+}
+
+export interface Proctor {
+  id: string;
+  username: string;
+  name: string;
 }
 
 export interface AttemptCounts {
@@ -53,7 +68,21 @@ export interface LocalSchedule {
   assetCount: number;
   assetsMissing: number;
   requiresToken: boolean;
+  accessToken: string | null;
   attempts: AttemptCounts;
+}
+
+/** Jadwal yang ditawarkan server lokal ke PC peserta. */
+export interface ExamSchedule {
+  scheduleId: string;
+  name: string;
+  examCode: string;
+  examTitle: string;
+  durationMinutes: number;
+  startAt: string;
+  endAt: string;
+  requiresToken: boolean;
+  ready: boolean;
 }
 
 export interface RemoteSchedule {
@@ -62,6 +91,7 @@ export interface RemoteSchedule {
   startAt: string;
   endAt: string;
   status: string;
+  accessToken: string | null;
   exam: { id: string; code: string; title: string; durationMinutes: number };
   package: { id: string; version: number; checksum: string | null; size: number | null; builtAt: string | null; assetCount: number | null } | null;
 }
@@ -113,6 +143,11 @@ export interface AttemptState {
   status: ExamSession["status"];
   remainingSeconds: number;
   violationCount: number;
+  deadline: string;
+  /** false bila server lokal sedang tidak terjangkau (jawaban diantrekan di PC). */
+  connected: boolean;
+  /** Perubahan yang menunggu dikirim ke server lokal. */
+  pending: number;
 }
 
 export interface SyncStatus {
@@ -120,27 +155,84 @@ export interface SyncStatus {
   lastSyncAt: string | null;
   lastError: string | null;
   autoSync: boolean;
+  proctorLogPending: number;
   batches: { id: string; createdAt: string; status: string; attemptCount: number; response: { attempts?: { attemptId: string; accepted: boolean; reason: string | null }[] } | null }[];
 }
 
-export interface AttemptRow {
-  id: string;
-  participantNumber: string;
-  participantName: string;
-  status: string;
-  startedAt: string;
+export interface MonitorRow {
+  participantId: string;
+  number: string;
+  name: string;
+  groupName: string | null;
+  attemptId: string | null;
+  status: "not_started" | ExamSession["status"];
+  deviceId: string | null;
+  deviceName: string | null;
+  deviceLastSeen: string | null;
+  startedAt: string | null;
   finishedAt: string | null;
+  deadline: string | null;
+  remainingSeconds: number;
   answered: number;
+  questionCount: number;
   violationCount: number;
   synced: boolean;
   syncError: string | null;
 }
 
+export interface Device {
+  id: string;
+  name: string;
+  status: "pending" | "approved" | "revoked";
+  pairingCode: string;
+  appVersion: string | null;
+  ip: string | null;
+  createdAt: string;
+  approvedAt: string | null;
+  approvedBy: string | null;
+  lastSeenAt: string | null;
+}
+
+export interface ProctorLogRow {
+  id: string;
+  at: string;
+  username: string;
+  action: string;
+  attemptId: string | null;
+  participantId: string | null;
+  data: Record<string, unknown> | null;
+  synced: boolean;
+}
+
+export interface LanInfo {
+  port: number;
+  running: boolean;
+  error: string | null;
+  addresses: string[];
+  devicesOnline: number;
+}
+
+export interface LinkStatus {
+  connected: boolean;
+  pending: number;
+  error: string | null;
+}
+
 export const ipc = {
+  // umum
   getConfig: () => invoke<ConfigView>("get_config"),
-  saveConfig: (input: ConfigInput) => invoke<ConfigView>("save_config", { input }),
-  unlockOperator: (pin: string) => invoke<boolean>("unlock_operator", { pin }),
-  lockOperator: () => invoke<void>("lock_operator"),
+  saveServerConfig: (input: ServerConfigInput) => invoke<ConfigView>("save_server_config", { input }),
+  saveParticipantConfig: (input: ParticipantConfigInput) => invoke<ConfigView>("save_participant_config", { input }),
+  proctorLogin: (username: string, password: string) => invoke<Proctor>("proctor_login", { username, password }),
+  proctorLogout: () => invoke<void>("proctor_logout"),
+  currentProctor: () => invoke<Proctor | null>("current_proctor"),
+  setExamMode: (active: boolean, lockdown: boolean) => invoke<void>("set_exam_mode", { active, lockdown }),
+  quitApp: () => invoke<void>("quit_app"),
+  appInfo: () => invoke<{ version: string; dataDir: string }>("app_info"),
+
+  // server lokal
+  syncProctors: () => invoke<{ count: number }>("sync_proctors"),
+  proctorCount: () => invoke<number>("proctor_count"),
   testConnection: () => invoke<{ site: { code: string; name: string }; serverTime: string }>("test_connection"),
   remoteSchedules: () => invoke<RemoteSchedule[]>("remote_schedules"),
   downloadSchedule: (scheduleId: string) =>
@@ -150,9 +242,24 @@ export const ipc = {
     ),
   localSchedules: () => invoke<LocalSchedule[]>("local_schedules"),
   syncStatus: () => invoke<SyncStatus>("sync_status"),
-  syncNow: () => invoke<{ attachmentsUploaded: number; attemptsSent: number; batches: string[] }>("sync_now"),
-  listAttempts: (scheduleId: string) => invoke<AttemptRow[]>("list_attempts", { scheduleId }),
-  resetAttempt: (attemptId: string) => invoke<void>("reset_attempt", { attemptId }),
+  syncNow: () => invoke<{ attachmentsUploaded: number; attemptsSent: number; batches: string[]; proctorLogSent: number }>("sync_now"),
+  monitor: (scheduleId: string) => invoke<MonitorRow[]>("monitor", { scheduleId }),
+  releaseDevice: (attemptId: string) => invoke<void>("release_device", { attemptId }),
+  extendTime: (attemptId: string, minutes: number) => invoke<AttemptState>("extend_time", { attemptId, minutes }),
+  terminateAttempt: (attemptId: string, reason?: string) => invoke<void>("terminate_attempt", { attemptId, reason: reason ?? null }),
+  unlockAttempt: (attemptId: string, extraMinutes?: number) =>
+    invoke<AttemptState>("unlock_attempt", { attemptId, extraMinutes: extraMinutes ?? null }),
+  deleteAttempt: (attemptId: string) => invoke<void>("delete_attempt", { attemptId }),
+  listDevices: () => invoke<Device[]>("list_devices"),
+  setDeviceStatus: (deviceId: string, approved: boolean) => invoke<void>("set_device_status", { deviceId, approved }),
+  deleteDevice: (deviceId: string) => invoke<void>("delete_device", { deviceId }),
+  proctorLog: () => invoke<ProctorLogRow[]>("proctor_log"),
+  lanInfo: () => invoke<LanInfo>("lan_info"),
+
+  // PC peserta
+  pairDevice: () => invoke<{ status: "pending" | "approved" | "revoked"; pairingCode: string }>("pair_device"),
+  linkStatus: () => invoke<LinkStatus>("link_status"),
+  examSchedules: () => invoke<ExamSchedule[]>("exam_schedules"),
   login: (request: { scheduleId: string; number: string; password: string; token?: string }) =>
     invoke<ExamSession>("participant_login", { request }),
   getSession: (attemptId: string) => invoke<ExamSession>("get_session", { attemptId }),
@@ -167,6 +274,7 @@ export const ipc = {
   logEvent: (attemptId: string, kind: string, data?: Record<string, unknown>) =>
     invoke<AttemptState>("log_event", { attemptId, kind, data: data ?? null }),
   submit: (attemptId: string, manual: boolean) => invoke<AttemptState>("submit_exam", { attemptId, manual }),
+  attemptState: (attemptId: string) => invoke<AttemptState>("attempt_state", { attemptId }),
   saveAttachment: (attemptId: string, questionId: string, name: string, mime: string, dataBase64: string) =>
     invoke<{ attachmentId: string; name: string; size: number; mime: string }>("save_attachment", {
       attemptId,
@@ -175,7 +283,4 @@ export const ipc = {
       mime,
       dataBase64,
     }),
-  setExamMode: (active: boolean, lockdown: boolean) => invoke<void>("set_exam_mode", { active, lockdown }),
-  quitApp: () => invoke<void>("quit_app"),
-  appInfo: () => invoke<{ version: string; dataDir: string }>("app_info"),
 };

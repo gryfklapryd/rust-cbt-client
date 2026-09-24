@@ -4,17 +4,20 @@ import { ExamSettings, StimulusSettings } from "./exam.js";
 import { QuestionType } from "./questions/types.js";
 
 /**
- * Kontrak sinkronisasi server pusat <-> client desktop (titik ujian).
+ * Kontrak sinkronisasi server pusat <-> server lokal titik ujian (aplikasi desktop
+ * mode server lokal). PC peserta tidak pernah memanggil API ini secara langsung.
  *
  * Alur:
  *  1. POST /api/sync/auth                     -> token lokasi (JWT)
- *  2. GET  /api/sync/schedules                -> daftar jadwal + versi paket
- *  3. GET  /api/sync/schedules/:id/package    -> ExamPackage (tanpa kunci jawaban)
- *  4. GET  /api/sync/assets/:assetId          -> unduh media (gambar/audio/video)
- *  5. (ujian berlangsung offline)
- *  6. POST /api/sync/attachments              -> unggah berkas jawaban (soal unggah berkas)
- *  7. POST /api/sync/results                  -> ResultsBatch (idempoten per batchId)
- *  8. GET  /api/sync/results/:batchId         -> status pemrosesan batch
+ *  2. GET  /api/sync/proctors                 -> akun proktor yang ditugaskan ke lokasi
+ *  3. GET  /api/sync/schedules                -> daftar jadwal + versi paket + token sesi
+ *  4. GET  /api/sync/schedules/:id/package    -> ExamPackage (tanpa kunci jawaban)
+ *  5. GET  /api/sync/assets/:assetId          -> unduh media (gambar/audio/video)
+ *  6. (ujian berlangsung di LAN lokasi, tanpa internet)
+ *  7. POST /api/sync/attachments              -> unggah berkas jawaban (soal unggah berkas)
+ *  8. POST /api/sync/results                  -> ResultsBatch (idempoten per batchId)
+ *  9. GET  /api/sync/results/:batchId         -> status pemrosesan batch
+ * 10. POST /api/sync/proctor-log              -> log aksi proktor (idempoten per id)
  */
 export const PACKAGE_FORMAT_VERSION = 1;
 
@@ -217,3 +220,59 @@ export const HeartbeatRequest = z.object({
   status: z.record(z.string(), z.unknown()).optional(),
 });
 export type HeartbeatRequest = z.infer<typeof HeartbeatRequest>;
+
+// ---------------------------------------------------------------------------
+// Proktor (server pusat <-> server lokal)
+// ---------------------------------------------------------------------------
+
+export const ProctorAccount = z.object({
+  id: z.uuid(),
+  username: z.string(),
+  name: z.string(),
+  role: z.string(),
+  /** Hash argon2id (format PHC) untuk verifikasi login proktor di server lokal tanpa internet. */
+  passwordHash: z.string(),
+});
+export type ProctorAccount = z.infer<typeof ProctorAccount>;
+
+export const ProctorsResponse = z.object({
+  serverTime: IsoDateTime,
+  proctors: z.array(ProctorAccount),
+});
+export type ProctorsResponse = z.infer<typeof ProctorsResponse>;
+
+export const PROCTOR_ACTIONS = [
+  "login",
+  "logout",
+  "device_approve",
+  "device_revoke",
+  "attempt_reset_device",
+  "attempt_extra_time",
+  "attempt_terminate",
+  "attempt_unlock",
+  "attempt_delete",
+  "package_download",
+  "results_upload",
+  "results_export",
+  "settings_change",
+] as const;
+
+export const ProctorLogEntry = z.object({
+  /** UUID dibuat server lokal; kunci idempoten. */
+  id: z.uuid(),
+  at: IsoDateTime,
+  proctorId: z.uuid().nullable(),
+  username: z.string().min(1).max(64),
+  /** Salah satu PROCTOR_ACTIONS; dibiarkan terbuka agar versi aplikasi baru tetap diterima. */
+  action: z.string().min(1).max(64),
+  scheduleId: z.uuid().nullable().optional(),
+  attemptId: z.uuid().nullable().optional(),
+  participantId: z.uuid().nullable().optional(),
+  data: z.record(z.string(), z.unknown()).optional(),
+});
+export type ProctorLogEntry = z.infer<typeof ProctorLogEntry>;
+
+export const ProctorLogBatch = z.object({
+  entries: z.array(ProctorLogEntry).min(1).max(1_000),
+});
+export type ProctorLogBatch = z.infer<typeof ProctorLogBatch>;

@@ -1,15 +1,20 @@
 //! Tes end-to-end melawan server pusat sungguhan (repo rust-cbt-master) yang sudah
-//! di-seed dengan `db:seed --demo`. Dilewati bila `CBT_E2E_SERVER` tidak diset.
+//! di-seed dengan `db:seed --demo`: server pusat -> server lokal (API LAN) -> PC peserta
+//! -> server lokal -> server pusat. Dilewati bila `CBT_E2E_SERVER` tidak diset.
 //!
 //!   CBT_E2E_SERVER=http://localhost:3000 cargo test --test e2e_server -- --nocapture
 //!
 //! Variabel opsional: CBT_E2E_SITE (DEMO-01), CBT_E2E_SECRET (demo-secret-ganti-saya),
+//! CBT_E2E_PROCTOR / CBT_E2E_PROCTOR_PASSWORD (proktor / proktor123),
 //! CBT_E2E_ADMIN_USER / CBT_E2E_ADMIN_PASSWORD (admin / admin12345) untuk memeriksa nilai.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use cbt_client_lib::core::exam::{LoginRequest, SaveAnswerRequest};
-use cbt_client_lib::core::{sync, ConfigInput, Core};
+use cbt_client_lib::core::participant::ParticipantLink;
+use cbt_client_lib::core::proctor::{LogTarget, DEVICE_APPROVED};
+use cbt_client_lib::core::{lan, sync, Core, ParticipantConfigInput, ServerConfigInput};
 use chrono::Utc;
 use serde_json::{json, Value};
 
@@ -46,26 +51,38 @@ async fn full_cycle_against_real_server() {
         eprintln!("CBT_E2E_SERVER tidak diset, tes e2e dilewati");
         return;
     };
+    // Server lokal titik ujian.
     let dir = tempfile::tempdir().unwrap();
-    let core = Core::open(dir.path()).unwrap();
-    core.save_config(ConfigInput {
+    let core = Arc::new(Core::open(dir.path()).unwrap());
+    core.save_server_config(ServerConfigInput {
         server_url: server.clone(),
         site_code: env("CBT_E2E_SITE", "DEMO-01"),
         secret: Some(env("CBT_E2E_SECRET", "demo-secret-ganti-saya")),
-        operator_pin: Some("1234".into()),
-        device_name: Some("E2E".into()),
+        device_name: Some("E2E-SERVER".into()),
         auto_sync: Some(false),
+        lan_port: None,
     })
     .unwrap();
     let api = cbt_client_lib::core::api::SyncApi::new(core.credentials().unwrap()).unwrap();
 
-    // 1. Jadwal & paket
+    // 1. Akun proktor, jadwal, paket
     api.auth().await.expect("auth lokasi");
-    let schedules = api.schedules().await.unwrap();
+    assert!(
+        sync::sync_proctors(&core, &api).await.unwrap() >= 1,
+        "proktor demo belum ditugaskan ke lokasi"
+    );
+    let proctor = core
+        .verify_proctor(
+            &env("CBT_E2E_PROCTOR", "proktor"),
+            &env("CBT_E2E_PROCTOR_PASSWORD", "proktor123"),
+        )
+        .expect("login proktor di server lokal");
+    let schedules = sync::remote_schedules(&core, &api).await.unwrap();
     let sched = schedules
         .iter()
         .find(|s| s.package.is_some() && s.name == "Sesi Demo")
         .expect("jadwal demo dengan paket siap");
+    assert_eq!(core.schedule_token(&sched.id).unwrap().as_deref(), Some("DEMO01"));
     let dl = sync::download_schedule(&core, &api, &sched.id).await.unwrap();
     assert!(dl.updated);
     assert_eq!(dl.assets_downloaded, dl.assets_total);
@@ -73,53 +90,82 @@ async fn full_cycle_against_real_server() {
     let again = sync::download_schedule(&core, &api, &sched.id).await.unwrap();
     assert!(!again.updated);
     assert_eq!(again.assets_downloaded, 0);
+    core.log_proctor(
+        &proctor,
+        "package_download",
+        LogTarget {
+            schedule_id: Some(&sched.id),
+            ..Default::default()
+        },
+        None,
+        Utc::now(),
+    )
+    .unwrap();
 
-    // 2. Ujian: peserta yang belum pernah ujian di server
+    // 2. API LAN + PC peserta
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let lan_core = core.clone();
+    let lan_task = tokio::spawn(async move { lan::serve_on(lan_core, listener).await.unwrap() });
+    let pc_dir = tempfile::tempdir().unwrap();
+    let pc = Arc::new(Core::open(pc_dir.path()).unwrap());
+    pc.save_participant_config(ParticipantConfigInput {
+        lan_url: format!("127.0.0.1:{port}"),
+        device_name: Some("E2E-PC01".into()),
+    })
+    .unwrap();
+    let link = ParticipantLink::new(pc.clone()).unwrap();
+    link.pair().await.unwrap();
+    core.set_device_status(&pc.config().unwrap().device_id, DEVICE_APPROVED, &proctor, Utc::now())
+        .unwrap();
+
+    // 3. Ujian di PC peserta: peserta yang belum pernah ujian di server
     let (pkg, _) = core.latest_package(&sched.id).unwrap().unwrap();
     let number = env("CBT_E2E_PARTICIPANT", "DEMO-0030");
-    let now = Utc::now();
-    let attempt_id = core
-        .login(
-            &LoginRequest {
-                schedule_id: sched.id.clone(),
-                number: number.clone(),
-                password: "123456".into(),
-                token: Some("DEMO01".into()),
-            },
-            now,
-        )
-        .expect("login peserta");
-    let session = core.session(&attempt_id, now).unwrap();
+    let session = link
+        .login(&LoginRequest {
+            schedule_id: sched.id.clone(),
+            number: number.clone(),
+            password: "123456".into(),
+            token: Some("DEMO01".into()),
+        })
+        .await
+        .expect("login peserta lewat server lokal");
+    let attempt_id = session.attempt_id.clone();
     for q in session.questions.values() {
         let mut response = correct_response(&q.qtype);
         if q.qtype == "file_upload" {
-            let att = core
-                .save_attachment(&attempt_id, &q.id, "kerja.png", "image/png", b"\x89PNG-demo", now)
+            let att = link
+                .save_attachment(&attempt_id, &q.id, "kerja.png", "image/png", b"\x89PNG-demo")
+                .await
                 .unwrap();
             response =
                 json!({ "files": [{ "attachmentId": att.attachment_id, "name": att.name, "size": att.size, "mime": att.mime }] });
         }
-        core.save_answer(
-            &SaveAnswerRequest {
+        let st = link
+            .save_answer(&SaveAnswerRequest {
                 attempt_id: attempt_id.clone(),
                 question_id: q.id.clone(),
                 response,
                 flagged: false,
                 time_spent_delta: 10,
                 current_index: None,
-            },
-            now,
-        )
-        .unwrap();
+            })
+            .await
+            .unwrap();
+        assert!(st.connected && st.pending == 0);
     }
-    core.log_event(&attempt_id, "violation", Some(json!({ "reason": "focus_lost" })), now)
+    link.log_event(&attempt_id, "violation", Some(json!({ "reason": "focus_lost" })))
+        .await
         .unwrap();
-    core.submit(&attempt_id, true, now).unwrap();
+    assert_eq!(link.submit(&attempt_id, true).await.unwrap().status, "submitted");
+    lan_task.abort();
 
     // 3. Kirim hasil & tunggu diproses server
     let up = sync::upload_results(&core, &api).await.unwrap();
     assert_eq!(up.attachments_uploaded, 1);
     assert_eq!(up.attempts_sent, 1);
+    assert!(up.proctor_log_sent >= 1);
     assert_eq!(core.attempt_counts(None).unwrap().unsynced, 0);
     let mut processed = false;
     for _ in 0..30 {
@@ -174,6 +220,11 @@ async fn full_cycle_against_real_server() {
         attempt["status"], attempt["gradingStatus"], attempt["score"], attempt["maxScore"]
     );
     assert_eq!(attempt["status"], "submitted");
+    assert!(
+        attempt["client"]["deviceId"].as_str().unwrap_or("").starts_with("E2E-PC01"),
+        "{}",
+        attempt["client"]
+    );
     assert_eq!(attempt["violationCount"], 1);
     // 13 soal otomatis benar; uraian & unggah berkas menunggu koreksi manual.
     assert_eq!(attempt["gradingStatus"], "partial");

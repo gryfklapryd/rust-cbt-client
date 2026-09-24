@@ -37,6 +37,9 @@ pub struct RemoteSchedule {
     pub start_at: String,
     pub end_at: String,
     pub status: String,
+    /// Token sesi asli untuk ditampilkan di dasbor proktor.
+    #[serde(default)]
+    pub access_token: Option<String>,
     pub exam: RemoteExam,
     pub package: Option<RemotePackageInfo>,
 }
@@ -66,6 +69,22 @@ pub struct BatchAck {
     pub error: Option<String>,
     #[serde(default)]
     pub attempts: Option<Vec<AttemptOutcome>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProctorAccount {
+    pub id: String,
+    pub username: String,
+    pub name: String,
+    pub role: String,
+    pub password_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProctorsResponse {
+    proctors: Vec<ProctorAccount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +280,22 @@ impl SyncApi {
         Ok(check(res).await?.json().await?)
     }
 
+    /// Akun proktor yang ditugaskan ke lokasi ini (beserta hash password).
+    pub async fn proctors(&self) -> AppResult<Vec<ProctorAccount>> {
+        let url = self.url("/proctors");
+        let res = self.send(|c, t| c.get(&url).bearer_auth(t)).await?;
+        Ok(check(res).await?.json::<ProctorsResponse>().await?.proctors)
+    }
+
+    /// Kirim log aksi proktor. Idempoten per id entri.
+    pub async fn proctor_log(&self, entries: &[Value]) -> AppResult<()> {
+        let url = self.url("/proctor-log");
+        let body = serde_json::json!({ "entries": entries });
+        let res = self.send(|c, t| c.post(&url).bearer_auth(t).json(&body)).await?;
+        check(res).await?;
+        Ok(())
+    }
+
     pub async fn heartbeat(&self, status: Value) -> AppResult<()> {
         let url = self.url("/heartbeat");
         let body = serde_json::json!({ "deviceId": self.creds.device_id, "appVersion": APP_VERSION, "status": status });
@@ -271,7 +306,7 @@ impl SyncApi {
 }
 
 /// Ubah respons non-2xx menjadi `AppError::Server` dengan pesan dari server.
-async fn check(res: Response) -> AppResult<Response> {
+pub(crate) async fn check(res: Response) -> AppResult<Response> {
     let status = res.status();
     if status.is_success() || status == StatusCode::NOT_MODIFIED {
         return Ok(res);
@@ -282,7 +317,7 @@ async fn check(res: Response) -> AppResult<Response> {
         .and_then(Value::as_str)
         .unwrap_or_else(|| status.canonical_reason().unwrap_or("error"))
         .to_string();
-    // Rincian validasi dari server (maks. 3) agar mudah didiagnosis operator.
+    // Rincian validasi dari server (maks. 3) agar mudah didiagnosis proktor.
     let details: Vec<String> = body
         .get("issues")
         .and_then(Value::as_array)

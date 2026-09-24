@@ -1,7 +1,8 @@
-//! Verifikasi hash argon2id format PHC (dibuat server pusat dengan @node-rs/argon2)
-//! dan hash PIN operator lokal.
+//! Verifikasi hash argon2id format PHC (dibuat server pusat dengan @node-rs/argon2),
+//! token perangkat acak, dan SHA-256.
 
-use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::password_hash::rand_core::{OsRng, RngCore};
+use argon2::password_hash::{PasswordHash, PasswordVerifier};
 use argon2::Argon2;
 use sha2::{Digest, Sha256};
 
@@ -14,12 +15,21 @@ pub fn verify_phc(phc: &str, password: &str) -> bool {
     }
 }
 
-pub fn hash_pin(pin: &str) -> Result<String, String> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(pin.as_bytes(), &salt)
-        .map(|h| h.to_string())
-        .map_err(|e| e.to_string())
+/// Token acak 256-bit (hex) untuk identitas PC peserta di server lokal.
+pub fn random_token() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Kode pendek 4 digit yang ditampilkan di PC peserta dan di dasbor proktor saat pendaftaran.
+pub fn pairing_code() -> String {
+    format!("{:04}", OsRng.next_u32() % 10_000)
+}
+
+/// Perbandingan waktu-konstan untuk hash token.
+pub fn constant_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -40,10 +50,13 @@ mod tests {
     }
 
     #[test]
-    fn pin_roundtrip() {
-        let h = hash_pin("2468").unwrap();
-        assert!(verify_phc(&h, "2468"));
-        assert!(!verify_phc(&h, "1357"));
+    fn tokens_are_random_hex() {
+        let a = random_token();
+        assert_eq!(a.len(), 64);
+        assert_ne!(a, random_token());
+        assert!(constant_eq(&a, &a.clone()));
+        assert!(!constant_eq(&a, &random_token()));
+        assert_eq!(pairing_code().len(), 4);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use serde::{Serialize, Serializer};
 
-/// Error aplikasi. Pesan ditujukan untuk ditampilkan ke operator / peserta.
+/// Error aplikasi. Pesan ditujukan untuk ditampilkan ke proktor / peserta.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     /// Kesalahan yang disebabkan input / keadaan (bukan bug), pesannya aman ditampilkan.
@@ -12,6 +12,9 @@ pub enum AppError {
     Network(String),
     #[error("Server menolak permintaan ({status}): {message}")]
     Server { status: u16, message: String },
+    /// Jawaban error dari API LAN server lokal (dilihat dari PC peserta).
+    #[error("{message}")]
+    Lan { status: u16, code: String, message: String },
     #[error("Kesalahan database lokal: {0}")]
     Db(#[from] rusqlite::Error),
     #[error("Kesalahan berkas: {0}")]
@@ -25,6 +28,22 @@ pub enum AppError {
 impl AppError {
     pub fn user(msg: impl Into<String>) -> Self {
         AppError::User(msg.into())
+    }
+
+    /// Gangguan sementara (jaringan / server lokal error): aksi boleh dicoba lagi nanti.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            AppError::Network(_) => true,
+            AppError::Lan { status, .. } => *status >= 500,
+            _ => false,
+        }
+    }
+
+    pub fn lan_code(&self) -> Option<&str> {
+        match self {
+            AppError::Lan { code, .. } => Some(code),
+            _ => None,
+        }
     }
 }
 
