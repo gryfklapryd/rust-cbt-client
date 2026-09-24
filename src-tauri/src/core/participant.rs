@@ -117,6 +117,59 @@ impl Core {
         Ok(())
     }
 
+    fn delete_cached_session(&self, attempt_id: &str) -> AppResult<()> {
+        self.db()
+            .conn
+            .execute("DELETE FROM cached_sessions WHERE attempt_id = ?1", [attempt_id])?;
+        Ok(())
+    }
+
+    /// Hapus salinan sesi yang sudah tidak diperlukan: ujiannya selesai (atau batas waktunya
+    /// lewat lebih dari 1 jam) dan semua datanya sudah terkirim ke server lokal. PC yang
+    /// dipakai bergantian tidak menyimpan jawaban peserta sebelumnya. Mengembalikan jumlah
+    /// sesi yang dihapus.
+    pub fn purge_finished_sessions(&self, now: DateTime<Utc>) -> AppResult<usize> {
+        let rows: Vec<(String, String)> = {
+            let db = self.db();
+            let mut stmt = db.conn.prepare("SELECT attempt_id, json FROM cached_sessions")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        let mut purged = 0;
+        for (attempt_id, json) in rows {
+            let expired = match serde_json::from_str::<ExamSession>(&json) {
+                Ok(s) => s.status != STATUS_IN_PROGRESS || s.deadline + chrono::Duration::hours(1) < now,
+                Err(_) => true,
+            };
+            if expired && self.outbox_count(Some(&attempt_id))? == 0 {
+                self.delete_cached_session(&attempt_id)?;
+                purged += 1;
+            }
+        }
+        Ok(purged)
+    }
+
+    /// Hapus item antrean beserta berkas lampiran yang ikut diantrekan.
+    fn drop_outbox(&self, item_id: Option<i64>, attempt_id: Option<&str>) -> AppResult<()> {
+        let db = self.db();
+        let filter = "(?1 IS NULL OR id = ?1) AND (?2 IS NULL OR attempt_id = ?2)";
+        let bodies: Vec<String> = {
+            let mut stmt = db
+                .conn
+                .prepare(&format!("SELECT body FROM outbox WHERE kind = 'attachment' AND {filter}"))?;
+            let rows = stmt.query_map(params![item_id, attempt_id], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for body in bodies {
+            if let Ok(q) = serde_json::from_str::<QueuedAttachment>(&body) {
+                let _ = std::fs::remove_file(&q.path);
+            }
+        }
+        db.conn
+            .execute(&format!("DELETE FROM outbox WHERE {filter}"), params![item_id, attempt_id])?;
+        Ok(())
+    }
+
     fn enqueue(&self, attempt_id: &str, kind: &str, body: &impl Serialize) -> AppResult<i64> {
         let db = self.db();
         db.conn.execute(
@@ -237,7 +290,12 @@ impl ParticipantLink {
         self.prefetch(&ls.assets)
             .await
             .map_err(|e| AppError::user(format!("Gagal mengambil media ujian dari server lokal: {e}")))?;
-        self.core.cache_session(&ls.session)?;
+        // Ujian yang sudah selesai dan terkirim tidak perlu disalin di PC ini.
+        if ls.session.status != STATUS_IN_PROGRESS && self.core.outbox_count(Some(&ls.session.attempt_id))? == 0 {
+            self.core.delete_cached_session(&ls.session.attempt_id)?;
+        } else {
+            self.core.cache_session(&ls.session)?;
+        }
         Ok(ls.session)
     }
 
@@ -385,6 +443,13 @@ impl ParticipantLink {
                 Ok(st) => {
                     let now = self.client.now();
                     self.core.update_cached(attempt_id, |s| apply_state(s, &st, now))?;
+                    // Ujian dibuka lagi oleh proktor setelah salinannya dihapus: ambil ulang
+                    // agar peserta tetap bisa mengerjakan bila jaringan putus.
+                    if st.status == STATUS_IN_PROGRESS && self.core.cached_session(attempt_id)?.is_none() {
+                        if let Ok(ls) = self.client.session(attempt_id).await {
+                            self.accept_session(ls).await?;
+                        }
+                    }
                     let pending = self.core.outbox_count(Some(attempt_id))?;
                     return Ok(AttemptState { pending, ..st });
                 }
@@ -453,20 +518,21 @@ impl ParticipantLink {
                     break;
                 }
                 Err(e) => {
-                    let db = self.core.db();
                     if e.lan_code().is_some_and(|c| MOVED_CODES.contains(&c)) {
-                        // Ujian dipindah proktor ke PC lain: sisa antrean attempt ini tidak berlaku.
-                        let _ = db
-                            .conn
-                            .execute("DELETE FROM outbox WHERE attempt_id = ?1", [&item.attempt_id]);
+                        // Ujian dipindah proktor ke PC lain: sisa antrean dan salinan sesi
+                        // attempt ini tidak berlaku lagi di PC ini.
+                        let _ = self.core.drop_outbox(None, Some(&item.attempt_id));
+                        let _ = self.core.delete_cached_session(&item.attempt_id);
                     } else {
-                        let _ = db.conn.execute("DELETE FROM outbox WHERE id = ?1", [item.id]);
+                        let _ = self.core.drop_outbox(Some(item.id), None);
                     }
-                    drop(db);
                     log::warn!("antrean {} ({}) ditolak server lokal: {e}", item.id, item.kind);
                     report.rejected.push((item.id, e));
                 }
             }
+        }
+        if let Err(e) = self.core.purge_finished_sessions(self.client.now()) {
+            log::warn!("gagal membersihkan salinan sesi: {e}");
         }
         report
     }

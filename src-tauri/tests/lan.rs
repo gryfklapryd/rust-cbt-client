@@ -145,6 +145,14 @@ fn qid(pkg: &Value, qtype: &str) -> String {
         .to_string()
 }
 
+/// Jumlah salinan sesi ujian yang tersimpan di PC peserta.
+fn cached_sessions(core: &Core) -> i64 {
+    core.db()
+        .conn
+        .query_row("SELECT count(*) FROM cached_sessions", [], |r| r.get(0))
+        .unwrap()
+}
+
 fn server_answer(core: &Core, attempt_id: &str, question_id: &str) -> Option<Value> {
     core.db()
         .conn
@@ -216,6 +224,8 @@ async fn pairing_login_answers_and_proctor_actions() {
     assert_eq!(err.lan_code(), Some("other_device"));
     assert_eq!(server_answer(&srv.core, &attempt, &sc), Some(json!({ "optionId": "A" })));
     assert_eq!(pc1.outbox_count(None).unwrap(), 0);
+    // PC lama tidak lagi menyimpan salinan jawaban peserta ini.
+    assert_eq!(cached_sessions(&pc1), 0);
 
     // Proktor menghentikan ujian: PC peserta melihat status dihentikan.
     srv.core.terminate(&attempt, Some("tes"), Utc::now()).unwrap();
@@ -237,6 +247,24 @@ async fn pairing_login_answers_and_proctor_actions() {
         "proktor"
     );
     assert!(link2.proctor_verify("proktor", "salah").await.is_err());
+
+    // PC dipakai bergantian: setelah peserta selesai dan semua terkirim, salinan jawabannya
+    // dihapus dari PC; peserta berikutnya login di PC yang sama.
+    assert_eq!(cached_sessions(&pc2), 1);
+    assert_eq!(link2.submit(&attempt, true).await.unwrap().status, "submitted");
+    assert_eq!(cached_sessions(&pc2), 0);
+    let finished = link2.session(&attempt).await.unwrap();
+    assert_eq!(finished.status, "submitted");
+    assert_eq!(cached_sessions(&pc2), 0);
+    let next = link2.login(&login_req(&pkg, "DEMO-0002")).await.unwrap();
+    assert_ne!(next.attempt_id, attempt);
+    assert_eq!(cached_sessions(&pc2), 1);
+    let rows = srv.core.monitor(pkg["schedule"]["id"].as_str().unwrap(), Utc::now()).unwrap();
+    let on_pc2 = rows.iter().filter(|r| r.device_name.as_deref() == Some("LAB1-PC02")).count();
+    assert_eq!(on_pc2, 2);
+    // Salinan ujian yang ditinggalkan dihapus setelah batas waktunya lewat lebih dari 1 jam.
+    assert_eq!(pc2.purge_finished_sessions(Utc::now()).unwrap(), 0);
+    assert_eq!(pc2.purge_finished_sessions(Utc::now() + Duration::hours(5)).unwrap(), 1);
     srv.task.abort();
 }
 
@@ -277,6 +305,10 @@ async fn answers_are_queued_while_server_is_unreachable() {
     let st = link.submit(&attempt, true).await.unwrap();
     assert_eq!(st.status, "submitted");
     assert_eq!(st.pending, 4);
+    // Selama masih ada yang belum terkirim, salinan sesi dan berkas lampiran tetap disimpan.
+    assert_eq!(pc.purge_finished_sessions(Utc::now()).unwrap(), 0);
+    assert_eq!(cached_sessions(&pc), 1);
+    assert_eq!(std::fs::read_dir(pc.data_dir().join("attachments")).unwrap().count(), 1);
 
     // Server hidup lagi di port yang sama: antrean terkirim berurutan.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", srv.port)).await.unwrap();
@@ -285,6 +317,9 @@ async fn answers_are_queued_while_server_is_unreachable() {
     assert!(report.blocked.is_none());
     assert_eq!(report.sent, 4);
     assert_eq!(pc.outbox_count(None).unwrap(), 0);
+    // Semua terkirim: tidak ada lagi jawaban atau berkas peserta ini di PC.
+    assert_eq!(cached_sessions(&pc), 0);
+    assert_eq!(std::fs::read_dir(pc.data_dir().join("attachments")).unwrap().count(), 0);
     assert_eq!(server_answer(&srv.core, &attempt, &sc), Some(json!({ "optionId": "C" })));
     assert_eq!(server_answer(&srv.core, &attempt, &tf), Some(json!({ "value": true })));
     let (upload, _) = srv.core.attempt_upload(&attempt, "server").unwrap();

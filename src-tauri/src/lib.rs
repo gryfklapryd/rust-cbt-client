@@ -84,13 +84,18 @@ pub fn run() {
                 }
             });
 
-            // PC peserta: kirim antrean yang tertunda ke server lokal.
+            // PC peserta: kirim antrean yang tertunda ke server lokal dan bersihkan salinan sesi.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(OUTBOX_INTERVAL).await;
                     let state = handle.state::<AppState>();
-                    if !state.core.is_participant() || state.core.outbox_count(None).unwrap_or(0) == 0 {
+                    if !state.core.is_participant() {
+                        continue;
+                    }
+                    if state.core.outbox_count(None).unwrap_or(0) == 0 {
+                        // Hapus salinan jawaban peserta yang ujiannya sudah selesai & terkirim.
+                        let _ = state.core.purge_finished_sessions(chrono::Utc::now());
                         continue;
                     }
                     if let Ok(link) = state.link().await {

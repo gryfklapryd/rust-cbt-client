@@ -37,6 +37,9 @@ Alur kerja di titik ujian:
   PC asing di jaringan tidak bisa mengambil soal atau mengirim jawaban.
 - **Tahan gangguan jaringan**: bila kabel/WiFi PC peserta putus, peserta tetap mengerjakan. Jawaban diantrekan di PC dan dikirim
   berurutan saat tersambung lagi. Bila PC rusak, proktor mengizinkan pindah komputer dan peserta melanjutkan dari jawaban terakhir.
+- **Satu PC untuk banyak peserta secara bergantian** (mis. sesi pagi dan siang). PC peserta hanya menyimpan salinan jawaban
+  selama ujian berjalan atau masih ada yang belum terkirim; setelah ujian selesai dan semua terkirim ke server lokal, salinan
+  jawaban dan berkas lampiran dihapus dari PC tersebut.
 - **Kunci jawaban tidak pernah ada di titik ujian**; penilaian dilakukan di server pusat.
 - **Pengacakan** soal (termasuk ambil acak N soal per bagian) dan opsi, deterministik per peserta.
 - **Timer dijaga server lokal**; ujian dikumpulkan otomatis saat waktu habis.
