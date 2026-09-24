@@ -327,6 +327,10 @@ function SettingsTab({ config, onConfigChanged, notify }: { config: ConfigView; 
           <h2>Koneksi server pusat</h2>
           <Button loading={testing} onClick={() => void test()}>Tes koneksi</Button>
         </div>
+        <p className="muted small">
+          Tes koneksi memakai alamat yang sudah disimpan: <span className="mono">{config.serverUrl ?? "-"}</span>.
+          Tekan Simpan dulu bila alamat di bawah diubah.
+        </p>
         <ConfigForm config={config} onSaved={onConfigChanged} />
       </section>
       <section className="card">

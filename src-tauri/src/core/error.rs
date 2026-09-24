@@ -34,17 +34,12 @@ impl From<reqwest::Error> for AppError {
     }
 }
 
-/// Pesan jaringan beserta penyebab aslinya (mis. koneksi ditolak, timeout, proxy),
-/// karena `to_string()` reqwest hanya berisi "error sending request".
+/// Pesan jaringan beserta alamat server dan penyebab aslinya (mis. koneksi ditolak,
+/// timeout, proxy), karena `to_string()` reqwest hanya berisi "error sending request".
 fn describe_reqwest(e: reqwest::Error) -> String {
+    let origin = e.url().map(|u| u.origin().ascii_serialization());
+    let https = e.url().is_some_and(|u| u.scheme() == "https");
     let e = e.without_url();
-    let hint = if e.is_timeout() {
-        Some("waktu habis")
-    } else if e.is_connect() {
-        Some("gagal membuka koneksi")
-    } else {
-        None
-    };
     let mut parts = vec![e.to_string()];
     let mut source = std::error::Error::source(&e);
     while let Some(s) = source {
@@ -55,10 +50,23 @@ fn describe_reqwest(e: reqwest::Error) -> String {
         source = s.source();
     }
     let detail = parts.join(": ");
-    match hint {
-        Some(h) => format!("{h} ({detail})"),
-        None => detail,
+    let target = origin.map(|o| format!(" ke {o}")).unwrap_or_default();
+    let mut msg = if e.is_timeout() {
+        format!("waktu habis{target} ({detail})")
+    } else if e.is_connect() {
+        format!("gagal membuka koneksi{target} ({detail})")
+    } else {
+        format!("{detail}{target}")
+    };
+    // Klien memulai TLS tetapi lawan bicara menjawab HTTP biasa.
+    if detail.contains("InvalidContentType") {
+        msg.push_str(if https {
+            ". Server di alamat ini tidak memakai HTTPS: ganti awalan alamat menjadi http:// lalu Simpan."
+        } else {
+            ". Koneksi dibelokkan ke proxy HTTPS yang tidak valid: periksa pengaturan proxy Windows."
+        });
     }
+    msg
 }
 
 /// Dikirim ke frontend sebagai string pesan.
@@ -84,10 +92,35 @@ mod tests {
             .unwrap_err();
         let msg = super::AppError::from(err).to_string();
         eprintln!("{msg}");
-        assert!(msg.contains("gagal membuka koneksi"), "{msg}");
+        assert!(msg.contains("gagal membuka koneksi ke http://127.0.0.1:1"), "{msg}");
         assert!(
             msg.len() > "Tidak dapat terhubung ke server pusat: error sending request".len() + 25,
             "{msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn https_to_plain_http_server_gets_hint() {
+        // Server HTTP biasa: TLS handshake klien dijawab teks HTTP.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n");
+        });
+        let err = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("https://127.0.0.1:{port}/"))
+            .send()
+            .await
+            .unwrap_err();
+        let msg = super::AppError::from(err).to_string();
+        eprintln!("{msg}");
+        assert!(msg.contains("ganti awalan alamat menjadi http://"), "{msg}");
     }
 }
