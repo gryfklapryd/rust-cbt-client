@@ -30,7 +30,34 @@ impl AppError {
 
 impl From<reqwest::Error> for AppError {
     fn from(e: reqwest::Error) -> Self {
-        AppError::Network(e.without_url().to_string())
+        AppError::Network(describe_reqwest(e))
+    }
+}
+
+/// Pesan jaringan beserta penyebab aslinya (mis. koneksi ditolak, timeout, proxy),
+/// karena `to_string()` reqwest hanya berisi "error sending request".
+fn describe_reqwest(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let hint = if e.is_timeout() {
+        Some("waktu habis")
+    } else if e.is_connect() {
+        Some("gagal membuka koneksi")
+    } else {
+        None
+    };
+    let mut parts = vec![e.to_string()];
+    let mut source = std::error::Error::source(&e);
+    while let Some(s) = source {
+        let msg = s.to_string();
+        if !parts.iter().any(|p| p.contains(&msg)) {
+            parts.push(msg);
+        }
+        source = s.source();
+    }
+    let detail = parts.join(": ");
+    match hint {
+        Some(h) => format!("{h} ({detail})"),
+        None => detail,
     }
 }
 
@@ -42,3 +69,25 @@ impl Serialize for AppError {
 }
 
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn network_error_includes_cause() {
+        let err = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .unwrap_err();
+        let msg = super::AppError::from(err).to_string();
+        eprintln!("{msg}");
+        assert!(msg.contains("gagal membuka koneksi"), "{msg}");
+        assert!(
+            msg.len() > "Tidak dapat terhubung ke server pusat: error sending request".len() + 25,
+            "{msg}"
+        );
+    }
+}

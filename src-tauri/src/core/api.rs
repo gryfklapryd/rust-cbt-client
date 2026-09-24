@@ -99,13 +99,40 @@ pub struct SyncApi {
 
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// True bila host server adalah localhost, loopback, atau alamat IP privat/LAN.
+pub fn is_local_server(server_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(server_url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+        Err(_) => {
+            let d = host.trim_end_matches('.').to_ascii_lowercase();
+            d == "localhost" || d.ends_with(".localhost") || d.ends_with(".local") || !d.contains('.')
+        }
+    }
+}
+
 impl SyncApi {
     pub fn new(creds: Credentials) -> AppResult<Self> {
-        let http = Client::builder()
+        let mut builder = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(300))
-            .user_agent(format!("cbt-client/{APP_VERSION}"))
-            .build()?;
+            .user_agent(format!("cbt-client/{APP_VERSION}"));
+        // Proxy sistem (Windows/env) sering tidak bisa meneruskan ke alamat lokal/LAN,
+        // jadi server di jaringan lokal selalu dihubungi langsung.
+        if is_local_server(&creds.server_url) {
+            builder = builder.no_proxy();
+        }
+        let http = builder.build()?;
         Ok(Self {
             http,
             creds,
@@ -280,4 +307,28 @@ async fn check(res: Response) -> AppResult<Response> {
         status: status.as_u16(),
         message,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_server;
+
+    #[test]
+    fn local_servers_bypass_proxy() {
+        for url in [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:3000",
+            "http://192.168.1.10:8080",
+            "http://10.0.0.5",
+            "http://172.16.3.4",
+            "http://server-cbt:8080",
+            "http://cbt.local",
+        ] {
+            assert!(is_local_server(url), "{url}");
+        }
+        for url in ["https://cbt.example.id", "http://8.8.8.8", "bukan url"] {
+            assert!(!is_local_server(url), "{url}");
+        }
+    }
 }
