@@ -1,0 +1,40 @@
+[package]
+name = "cbt-client"
+version = "0.1.0"
+description = "Aplikasi desktop CBT untuk titik ujian: unduh paket, ujian offline, kirim hasil ke server pusat"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+name = "cbt_client_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+argon2 = "0.5"
+# OsRng untuk salt hash PIN operator
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+log = "0.4"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

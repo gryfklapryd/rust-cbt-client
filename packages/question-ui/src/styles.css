@@ -1,0 +1,88 @@
+/* Gaya dasar komponen soal. Semua kelas berawalan `cbtq-`. Warna mengikuti variabel CSS
+   supaya mudah diselaraskan dengan tema aplikasi (admin / desktop). */
+.cbtq {
+  --cbtq-accent: var(--accent, #2563eb);
+  --cbtq-accent-soft: var(--accent-soft, #dbeafe);
+  --cbtq-border: var(--border, #d4d4d8);
+  --cbtq-muted: var(--muted, #71717a);
+  --cbtq-surface: var(--surface, #fff);
+  --cbtq-text: var(--text, #18181b);
+  color: var(--cbtq-text);
+  font-size: 1rem;
+  line-height: 1.6;
+}
+.cbtq img, .cbtq video { max-width: 100%; height: auto; }
+.cbtq audio { width: 100%; }
+.cbtq-prompt { margin-bottom: 1rem; }
+.cbtq-prompt > :first-child { margin-top: 0; }
+.cbtq-hint { color: var(--cbtq-muted); font-size: 0.875rem; margin: 0.25rem 0 0.5rem; }
+.cbtq-warn { color: #b45309; }
+.cbtq-error { color: #b91c1c; }
+.cbtq-options { display: flex; flex-direction: column; gap: 0.5rem; }
+.cbtq-inline { flex-direction: row; flex-wrap: wrap; }
+.cbtq-option {
+  display: flex; align-items: flex-start; gap: 0.75rem; width: 100%; text-align: left;
+  padding: 0.625rem 0.875rem; border: 1px solid var(--cbtq-border); border-radius: 0.5rem;
+  background: var(--cbtq-surface); color: inherit; font: inherit; cursor: pointer;
+}
+.cbtq-inline .cbtq-option { width: auto; min-width: 7rem; justify-content: center; }
+.cbtq-option:hover:not(:disabled) { border-color: var(--cbtq-accent); }
+.cbtq-option.is-selected { border-color: var(--cbtq-accent); background: var(--cbtq-accent-soft); box-shadow: inset 0 0 0 1px var(--cbtq-accent); }
+.cbtq-option:disabled { cursor: default; }
+.cbtq-letter {
+  flex: none; display: inline-grid; place-items: center; width: 1.75rem; height: 1.75rem;
+  border: 1px solid var(--cbtq-border); border-radius: 999px; font-weight: 600; font-size: 0.875rem;
+}
+.cbtq-check .cbtq-letter { border-radius: 0.3rem; }
+.is-selected > .cbtq-letter { background: var(--cbtq-accent); border-color: var(--cbtq-accent); color: #fff; }
+.cbtq-choice-content > p { margin: 0; }
+.cbtq-table { width: 100%; border-collapse: collapse; }
+.cbtq-table th, .cbtq-table td { border: 1px solid var(--cbtq-border); padding: 0.5rem; vertical-align: middle; }
+.cbtq-table th { background: color-mix(in srgb, var(--cbtq-border) 25%, transparent); font-weight: 600; }
+.cbtq-table td > div > p { margin: 0; }
+.cbtq-center { text-align: center; width: 6rem; }
+.cbtq-center input { width: 1.2rem; height: 1.2rem; }
+.cbtq-input, .cbtq-select, .cbtq-textarea {
+  font: inherit; color: inherit; background: var(--cbtq-surface);
+  border: 1px solid var(--cbtq-border); border-radius: 0.4rem; padding: 0.4rem 0.6rem;
+}
+.cbtq-input { width: 100%; max-width: 32rem; }
+.cbtq-textarea { width: 100%; resize: vertical; }
+.cbtq-numeric { display: flex; align-items: center; gap: 0.5rem; }
+.cbtq-numeric .cbtq-input { max-width: 14rem; }
+.cbtq-unit { color: var(--cbtq-muted); }
+.cbtq-right-list { list-style: none; padding: 0; margin: 0 0 1rem; display: grid; gap: 0.35rem; }
+.cbtq-right-list li { display: flex; align-items: center; gap: 0.5rem; }
+.cbtq-select-cell { width: 9rem; }
+.cbtq-ordering { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.4rem; }
+.cbtq-order-item { display: flex; align-items: center; gap: 0.75rem; border: 1px solid var(--cbtq-border); border-radius: 0.5rem; padding: 0.5rem 0.75rem; background: var(--cbtq-surface); }
+.cbtq-order-num { font-weight: 700; color: var(--cbtq-accent); min-width: 1.5rem; }
+.cbtq-order-actions { display: flex; gap: 0.25rem; }
+.cbtq-order-actions button { border: 1px solid var(--cbtq-border); background: var(--cbtq-surface); border-radius: 0.3rem; cursor: pointer; padding: 0.1rem 0.45rem; color: inherit; }
+.cbtq-grow { flex: 1; }
+.cbtq-grow > p { margin: 0; }
+.cbtq-cloze { line-height: 2.4; }
+.cbtq-blank { width: auto; display: inline-block; margin: 0 0.15rem; padding: 0.15rem 0.4rem; }
+.cbtq-wordbank { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0.75rem; }
+.cbtq-chip { border: 1px dashed var(--cbtq-accent); border-radius: 999px; padding: 0.15rem 0.7rem; font-size: 0.9rem; }
+.cbtq-chip.is-used { opacity: 0.4; text-decoration: line-through; }
+.cbtq-categorize { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); }
+.cbtq-bucket { border: 1px solid var(--cbtq-border); border-radius: 0.6rem; padding: 0.6rem; background: var(--cbtq-surface); }
+.cbtq-bucket.is-pool { border-style: dashed; }
+.cbtq-bucket-title { font-weight: 600; margin-bottom: 0.4rem; }
+.cbtq-bucket-title > p { margin: 0; }
+.cbtq-bucket-item { display: flex; gap: 0.5rem; align-items: center; padding: 0.3rem 0; border-top: 1px solid var(--cbtq-border); }
+.cbtq-hotspot { position: relative; display: inline-block; width: 100%; max-width: 800px; cursor: crosshair; user-select: none; }
+.cbtq-readonly .cbtq-hotspot { cursor: default; }
+.cbtq-hotspot img { display: block; width: 100%; height: 100%; }
+.cbtq-marker {
+  position: absolute; transform: translate(-50%, -50%); width: 1.6rem; height: 1.6rem; border-radius: 999px;
+  border: 2px solid #fff; background: var(--cbtq-accent); color: #fff; font-size: 0.75rem; font-weight: 700; cursor: pointer;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.4);
+}
+.cbtq-hottext { line-height: 2.2; }
+.cbtq-segment { font: inherit; color: inherit; background: none; border: none; border-bottom: 2px dotted var(--cbtq-muted); padding: 0 0.1rem; cursor: pointer; border-radius: 0.2rem; }
+.cbtq-segment.is-selected { background: #fde68a; border-bottom-color: #d97706; }
+.cbtq-segment:disabled { cursor: default; }
+.cbtq-files { padding-left: 1rem; }
+.cbtq-link { background: none; border: none; color: var(--cbtq-accent); cursor: pointer; text-decoration: underline; font: inherit; margin-left: 0.5rem; }

@@ -1,0 +1,14 @@
+{
+  "name": "@cbt/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Kontrak bersama: skema jenis soal, penilaian otomatis, dan protokol sinkronisasi server <-> desktop (salinan dari rust-cbt-master, jangan diubah di sini; jalankan scripts/sync-shared.sh)",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {}
+}

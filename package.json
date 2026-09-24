@@ -1,0 +1,32 @@
+{
+  "name": "rust-cbt-client",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Aplikasi desktop CBT (Tauri) untuk titik ujian",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri",
+    "app:dev": "tauri dev",
+    "app:build": "tauri build"
+  },
+  "dependencies": {
+    "@cbt/question-ui": "workspace:*",
+    "@cbt/shared": "workspace:*",
+    "@tauri-apps/api": "^2.11.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.5",
+    "@types/node": "^22.20.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.0"
+  }
+}
